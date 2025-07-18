@@ -1,0 +1,145 @@
+#!/bin/bash
+#
+# Author: PB and Claude
+# Date: 2025-07-18
+# License: (c) HRDAG, 2025, GPL-2 or newer
+#
+# ------
+# zfs-fd/zfs-fd-mount
+
+# Usage: zfs-fd-mount [clone-base]
+# 
+# Mounts all cloned datasets for analysis
+# Uses environment variables from zfs-fd-snapshot or accepts command line argument
+
+set -euo pipefail
+
+# Check for environment variables or command line argument
+CLONE_BASE="${1:-${ZFS_FD_CLONE_BASE:-}}"
+
+if [[ -z "$CLONE_BASE" ]]; then
+    echo "ERROR: No clone base specified"
+    echo "Either set ZFS_FD_CLONE_BASE or provide as argument:"
+    echo "  zfs-fd-mount <clone-base>"
+    echo "  (or run zfs-fd-snapshot first)"
+    exit 1
+fi
+
+# Set up logging
+if [[ -n "${ZFS_FD_LOG_FILE:-}" ]]; then
+    LOG_FILE="$ZFS_FD_LOG_FILE"
+else
+    # Fallback if no environment
+    LOG_FILE="/tmp/zfs-fd-mount-$(date -Iseconds).log"
+fi
+
+# Log function
+log() {
+    echo "$(date -Iseconds) [zfs-fd-mount] $1" | tee -a "$LOG_FILE"
+}
+
+log "Starting mount process for clone base: $CLONE_BASE"
+
+# Get all datasets in the clone hierarchy
+DATASETS=$(zfs list -H -r -o name "$CLONE_BASE" | sort)
+
+if [[ -z "$DATASETS" ]]; then
+    echo "ERROR: No datasets found for $CLONE_BASE" >&2
+    log "ERROR: No datasets found for $CLONE_BASE"
+    exit 1
+fi
+
+log "Found $(echo "$DATASETS" | wc -l) datasets to mount"
+echo "🔍 Found $(echo "$DATASETS" | wc -l) datasets to mount"
+
+# Mount each dataset
+MOUNTED_COUNT=0
+FAILED_COUNT=0
+
+while IFS= read -r dataset; do
+    # Check if already mounted
+    if zfs get -H -o value mounted "$dataset" 2>/dev/null | grep -q "yes"; then
+        echo "ℹ️  Already mounted: $dataset"
+        log "INFO: Already mounted $dataset"
+        MOUNTED_COUNT=$((MOUNTED_COUNT + 1))
+        continue
+    fi
+    
+    # Enable mounting for this dataset
+    log "Enabling mount for $dataset..."
+    if sudo zfs set canmount=on "$dataset" 2>/dev/null; then
+        log "SUCCESS: Set canmount=on for $dataset"
+    else
+        log "WARNING: Could not set canmount=on for $dataset"
+    fi
+    
+    # Mount the dataset
+    log "Mounting $dataset..."
+    if sudo zfs mount "$dataset" 2>/dev/null; then
+        echo "✅ Mounted: $dataset"
+        log "SUCCESS: Mounted $dataset"
+        MOUNTED_COUNT=$((MOUNTED_COUNT + 1))
+    else
+        echo "❌ Failed to mount: $dataset" >&2
+        log "ERROR: Failed to mount $dataset"
+        FAILED_COUNT=$((FAILED_COUNT + 1))
+    fi
+done < <(echo "$DATASETS")
+
+log "Mount process complete: $MOUNTED_COUNT mounted, $FAILED_COUNT failed"
+
+# Determine the correct mount base path
+# Get the mountpoint of the base dataset
+ACTUAL_MOUNT_BASE=$(zfs get -H -o value mountpoint "$CLONE_BASE" 2>/dev/null || echo "")
+
+if [[ -n "$ACTUAL_MOUNT_BASE" && -d "$ACTUAL_MOUNT_BASE" ]]; then
+    echo "✅ Mount base exists: $ACTUAL_MOUNT_BASE"
+    log "SUCCESS: Mount base verified: $ACTUAL_MOUNT_BASE"
+    
+    # Update environment if available
+    if [[ -n "${ZFS_FD_RESULTS_DIR:-}" ]]; then
+        # Update the environment file with correct mount base
+        sed -i "s|export ZFS_FD_MOUNT_BASE=.*|export ZFS_FD_MOUNT_BASE=\"$ACTUAL_MOUNT_BASE\"|" "$ZFS_FD_RESULTS_DIR/environment.sh"
+        export ZFS_FD_MOUNT_BASE="$ACTUAL_MOUNT_BASE"
+export ZFS_FD_MOUNT_BASE=/storage/tmp/zfs-fd-analysis
+
+        log "Updated ZFS_FD_MOUNT_BASE: $ACTUAL_MOUNT_BASE"
+    fi
+    
+    # Show directory structure
+    echo "📁 Directory structure:"
+    ls -la "$ACTUAL_MOUNT_BASE" | head -10
+    
+    # Check for key datasets
+    echo ""
+    echo "🔍 Key datasets:"
+    if [[ -d "$ACTUAL_MOUNT_BASE/home" ]]; then
+        HOME_SIZE=$(du -sh "$ACTUAL_MOUNT_BASE/home" 2>/dev/null | cut -f1 || echo "unknown")
+        echo "  📁 home/ ($HOME_SIZE)"
+    fi
+    if [[ -d "$ACTUAL_MOUNT_BASE/zsd" ]]; then
+        ZSD_SIZE=$(du -sh "$ACTUAL_MOUNT_BASE/zsd" 2>/dev/null | cut -f1 || echo "unknown")
+        echo "  📁 zsd/ ($ZSD_SIZE)"
+    fi
+    
+else
+    echo "❌ Mount base not found: $ACTUAL_MOUNT_BASE" >&2
+    log "ERROR: Mount base not found: $ACTUAL_MOUNT_BASE"
+    exit 1
+fi
+
+if [[ $FAILED_COUNT -gt 0 ]]; then
+    echo "⚠️  $FAILED_COUNT datasets failed to mount"
+    log "WARNING: $FAILED_COUNT datasets failed to mount"
+fi
+
+# Update environment file with mount base
+if [[ -n "$ZFS_FD_RESULTS_DIR" ]] && [[ -f "$ZFS_FD_RESULTS_DIR/environment.sh" ]]; then
+    echo "export ZFS_FD_MOUNT_BASE=\"$ACTUAL_MOUNT_BASE\"" >> "$ZFS_FD_RESULTS_DIR/environment.sh"
+    log "Updated environment file with mount base: $ACTUAL_MOUNT_BASE"
+fi
+
+log "All available datasets processed"
+echo "✅ Mount process complete!"
+echo "📁 Ready for analysis at: $ACTUAL_MOUNT_BASE"
+echo "▶️  Next step: zfs-fd-capture --depth N"

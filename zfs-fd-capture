@@ -1,0 +1,109 @@
+#!/bin/bash
+#
+# Author: PB and Claude
+# Date: 2025-07-18
+# License: (c) HRDAG, 2025, GPL-2 or newer
+#
+# ------
+# zfs-fd/zfs-fd-capture
+
+# Usage: zfs-fd-capture [--depth N] [mount-base]
+# 
+# Performs fast file metadata capture using fd + stat
+# Writes results to filelist.txt
+
+set -euo pipefail
+
+# Source the latest environment file
+env_file=$(ls -t /var/lib/zfs-fd/*/environment.sh 2>/dev/null | head -n1)
+if [[ -f "$env_file" ]]; then
+    source "$env_file"
+else
+    echo "ERROR: No environment file found" >&2
+    echo "Please run zfs-fd-snapshot and zfs-fd-mount first" >&2
+    exit 1
+fi
+
+# Parse command line arguments
+DEPTH=""
+MOUNT_BASE=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --depth)
+            DEPTH="$2"
+            shift 2
+            ;;
+        --help)
+            echo "Usage: $0 [--depth N] [mount-base]"
+            echo "Captures file metadata using fd + stat"
+            exit 0
+            ;;
+        *)
+            if [[ -z "$MOUNT_BASE" ]]; then
+                MOUNT_BASE="$1"
+            else
+                echo "ERROR: Unknown argument: $1" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Use environment variables if not provided
+MOUNT_BASE="${MOUNT_BASE:-$ZFS_FD_MOUNT_BASE}"
+DEPTH="${DEPTH:-$ZFS_FD_DEPTH}"
+
+# Validate required parameters
+if [[ -z "$MOUNT_BASE" ]]; then
+    echo "ERROR: No mount base specified" >&2
+    echo "Either set ZFS_FD_MOUNT_BASE or provide as argument:" >&2
+    echo "  zfs-fd-capture [--depth N] <mount-base>" >&2
+    echo "  (or run zfs-fd-snapshot and zfs-fd-mount first)" >&2
+    exit 1
+fi
+
+if [[ ! -d "$MOUNT_BASE" ]]; then
+    echo "ERROR: Mount base directory not found: $MOUNT_BASE" >&2
+    exit 1
+fi
+
+# Set up logging
+LOG_FILE="${ZFS_FD_LOG_FILE:-/var/log/zfs-fd/capture.log}"
+RESULTS_DIR="${ZFS_FD_RESULTS_DIR:-/tmp/zfs-fd-results}"
+
+# Create results directory if it doesn't exist
+sudo mkdir -p "$RESULTS_DIR"
+
+# Logging function
+log() {
+    echo "$(date -Iseconds) [zfs-fd-capture] $1" | sudo tee -a "$LOG_FILE"
+}
+
+# Start capture process
+log "Starting fast file metadata capture using fd + stat"
+log "Mount base: $MOUNT_BASE"
+log "Results directory: $RESULTS_DIR"
+
+echo "📋 Starting fast file metadata capture..."
+echo "📁 Mount base: $MOUNT_BASE"
+echo "💾 Results: $RESULTS_DIR"
+
+# Create filelist output
+FILELIST_FILE="$RESULTS_DIR/filelist.txt"
+
+log "Capturing file metadata to $FILELIST_FILE"
+echo "📋 Capturing file metadata..."
+
+# Run the capture command
+fdfind --type f . "$MOUNT_BASE" --exec-batch stat --format='%s %n' > "$FILELIST_FILE"
+
+# Get file count and log success
+FILE_COUNT=$(wc -l < "$FILELIST_FILE")
+log "Capture complete: $FILE_COUNT files processed"
+
+echo "✅ Capture complete!"
+echo "📊 Files processed: $FILE_COUNT"
+echo "📄 Results file: $FILELIST_FILE"
+echo "▶️  Next step: zfs-fd-report (coming soon)"

@@ -1,0 +1,198 @@
+#!/bin/bash
+#
+# Author: PB and Claude
+# Date: 2025-07-18
+# License: (c) HRDAG, 2025, GPL-2 or newer
+#
+# ------
+# zfs-fd/zfs-fd-cleanup
+
+# Usage: zfs-fd-cleanup [--yes] [clone-base] [snapshot-tag]
+# 
+# Cleans up cloned datasets and removes snapshots
+# Uses environment variables or accepts command line arguments
+
+set -euo pipefail
+
+# Parse command line arguments
+SKIP_CONFIRMATION=false
+CLONE_BASE=""
+SNAPSHOT_TAG=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --yes|-y)
+            SKIP_CONFIRMATION=true
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            if [[ -z "$CLONE_BASE" ]]; then
+                CLONE_BASE="$1"
+            else
+                SNAPSHOT_TAG="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Determine clone base and snapshot tag
+if [[ -z "$CLONE_BASE" ]]; then
+    CLONE_BASE="${ZFS_FD_CLONE_BASE:-}"
+fi
+
+if [[ -z "$SNAPSHOT_TAG" ]]; then
+    SNAPSHOT_TAG="${ZFS_FD_SNAPTAG:-}"
+fi
+
+if [[ -z "$CLONE_BASE" ]]; then
+    echo "ERROR: No clone base specified"
+    echo "Either set ZFS_FD_CLONE_BASE or provide as argument:"
+    echo "  zfs-fd-cleanup [--yes] <clone-base> [snapshot-tag]"
+    echo "  (or run zfs-fd-snapshot first)"
+    exit 1
+fi
+
+# Set up logging
+if [[ -n "${ZFS_FD_LOG_FILE:-}" ]]; then
+    LOG_FILE="$ZFS_FD_LOG_FILE"
+else
+    # Fallback if no environment
+    LOG_FILE="/tmp/zfs-fd-cleanup-$(date -Iseconds).log"
+fi
+
+# Log function
+log() {
+    echo "$(date -Iseconds) [zfs-fd-cleanup] $1" | tee -a "$LOG_FILE"
+}
+
+log "Starting cleanup process"
+log "Clone base: $CLONE_BASE"
+log "Snapshot tag: $SNAPSHOT_TAG"
+
+# Check if clone base exists
+if ! zfs list "$CLONE_BASE" >/dev/null 2>&1; then
+    echo "INFO: Clone base $CLONE_BASE does not exist - nothing to clean up"
+    log "INFO: Clone base $CLONE_BASE does not exist"
+    exit 0
+fi
+
+# Get list of datasets to clean up
+DATASETS=$(zfs list -H -r -o name "$CLONE_BASE" | sort -r)  # Reverse order for proper cleanup
+DATASET_COUNT=$(echo "$DATASETS" | wc -l)
+
+echo "🧹 Cleanup process starting..."
+echo "📁 Clone base: $CLONE_BASE"
+echo "📊 Datasets to remove: $DATASET_COUNT"
+
+# Show what will be cleaned up
+echo ""
+echo "Datasets to be destroyed:"
+echo "$DATASETS" | while read -r ds; do
+    echo "  - $ds"
+done
+
+# If we have snapshot info, show snapshot cleanup too
+if [[ -n "$SNAPSHOT_TAG" ]]; then
+    SOURCE_DATASET=$(echo "$CLONE_BASE" | sed 's|/tmp/zfs-fd-analysis||')
+    SOURCE_SNAP="${SOURCE_DATASET}@${SNAPSHOT_TAG}"
+    
+    echo ""
+    echo "Snapshot cleanup:"
+    echo "  - Release hold on: $SOURCE_SNAP"
+    echo "  - Destroy snapshot: $SOURCE_SNAP"
+fi
+
+# Confirmation prompt
+if [[ "$SKIP_CONFIRMATION" == "false" ]]; then
+    echo ""
+    read -p "Proceed with cleanup? This will destroy all cloned datasets and snapshots. [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Cleanup cancelled."
+        log "Cleanup cancelled by user"
+        exit 0
+    fi
+fi
+
+log "Starting dataset destruction"
+
+# Destroy datasets (in reverse order)
+DESTROYED_COUNT=0
+FAILED_COUNT=0
+
+echo ""
+echo "🗑️  Destroying datasets..."
+
+while IFS= read -r dataset; do
+    log "Destroying $dataset"
+    if sudo zfs destroy "$dataset" 2>/dev/null; then
+        echo "✅ Destroyed: $dataset"
+        log "SUCCESS: Destroyed $dataset"
+        ((DESTROYED_COUNT++))
+    else
+        echo "❌ Failed to destroy: $dataset" >&2
+        log "ERROR: Failed to destroy $dataset"
+        ((FAILED_COUNT++))
+    fi
+done <<< "$DATASETS"
+
+log "Dataset destruction complete: $DESTROYED_COUNT destroyed, $FAILED_COUNT failed"
+
+# Clean up snapshot if we have the info
+if [[ -n "$SNAPSHOT_TAG" ]]; then
+    SOURCE_DATASET=$(echo "$CLONE_BASE" | sed 's|/tmp/zfs-fd-analysis||')
+    SOURCE_SNAP="${SOURCE_DATASET}@${SNAPSHOT_TAG}"
+    
+    echo ""
+    echo "🔒 Cleaning up snapshot..."
+    
+    # Release hold
+    log "Releasing hold on $SOURCE_SNAP"
+    if sudo zfs release -r du_analysis_hold "$SOURCE_SNAP" 2>/dev/null; then
+        echo "✅ Released hold on: $SOURCE_SNAP"
+        log "SUCCESS: Released hold on $SOURCE_SNAP"
+    else
+        echo "⚠️  Could not release hold on: $SOURCE_SNAP"
+        log "WARNING: Could not release hold on $SOURCE_SNAP"
+    fi
+    
+    # Destroy snapshot
+    log "Destroying snapshot $SOURCE_SNAP"
+    if sudo zfs destroy -r "$SOURCE_SNAP" 2>/dev/null; then
+        echo "✅ Destroyed snapshot: $SOURCE_SNAP"
+        log "SUCCESS: Destroyed snapshot $SOURCE_SNAP"
+    else
+        echo "⚠️  Could not destroy snapshot: $SOURCE_SNAP"
+        log "WARNING: Could not destroy snapshot $SOURCE_SNAP"
+    fi
+fi
+
+# Summary
+if [[ $FAILED_COUNT -gt 0 ]]; then
+    echo ""
+    echo "⚠️  Cleanup completed with $FAILED_COUNT failures"
+    echo "❌ $FAILED_COUNT datasets failed to destroy"
+    echo "✅ $DESTROYED_COUNT datasets destroyed successfully"
+    log "Cleanup completed with failures: $DESTROYED_COUNT destroyed, $FAILED_COUNT failed"
+    exit 1
+else
+    echo ""
+    echo "✅ Cleanup completed successfully!"
+    echo "🗑️  $DESTROYED_COUNT datasets destroyed"
+    log "Cleanup completed successfully: $DESTROYED_COUNT datasets destroyed"
+fi
+
+# Note about results
+if [[ -n "${ZFS_FD_RESULTS_DIR:-}" ]]; then
+    echo ""
+    echo "📄 Analysis results preserved at: $ZFS_FD_RESULTS_DIR"
+    echo "📄 Log file preserved at: $ZFS_FD_LOG_FILE"
+    log "Analysis results preserved at: $ZFS_FD_RESULTS_DIR"
+fi
+
+log "Cleanup process complete"

@@ -1,0 +1,123 @@
+#!/bin/bash
+#
+# Author: PB and Claude
+# Date: 2025-07-18
+# License: (c) HRDAG, 2025, GPL-2 or newer
+#
+# ------
+# zfs-fd/zfs-fd-snapshot
+
+# Usage: zfs-fd-snapshot [source-dataset] [clone-destination]
+# 
+# Creates recursive snapshot and sets up environment for ZFS directory analysis
+# If no arguments provided, uses defaults for deep_chll/backup/nas
+
+set -euo pipefail
+
+# Default values
+DEFAULT_SOURCE="deep_chll/backup/nas"
+DEFAULT_CLONE_BASE="deep_chll/tmp/zfs-fd-analysis"
+
+# Parse arguments
+SOURCE_DATASET="${1:-$DEFAULT_SOURCE}"
+CLONE_BASE="${2:-$DEFAULT_CLONE_BASE}"
+
+# Set up environment variables
+export ZFS_FD_TIMESTAMP="$(date -Iseconds)"
+export ZFS_FD_SNAPTAG="du-holder-${ZFS_FD_TIMESTAMP}"
+export ZFS_FD_SOURCE_SNAP="${SOURCE_DATASET}@${ZFS_FD_SNAPTAG}"
+export ZFS_FD_CLONE_BASE="$CLONE_BASE"
+export ZFS_FD_RESULTS_DIR="/var/lib/zfs-fd/${ZFS_FD_TIMESTAMP}"
+export ZFS_FD_LOG_FILE="/var/log/zfs-fd/${ZFS_FD_TIMESTAMP}.log"
+export ZFS_FD_DEPTH="3"  # Default depth
+
+# Create results and log directories
+sudo mkdir -p "$ZFS_FD_RESULTS_DIR" "/var/log/zfs-fd"
+sudo chown pball:pball "$ZFS_FD_RESULTS_DIR" "/var/log/zfs-fd"
+
+# Log function
+log() {
+    echo "$(date -Iseconds) [zfs-fd-snapshot] $1" | tee -a "$ZFS_FD_LOG_FILE"
+}
+
+log "Starting ZFS directory analysis setup"
+log "Source dataset: $SOURCE_DATASET"
+log "Clone destination: $CLONE_BASE"
+log "Snapshot tag: $ZFS_FD_SNAPTAG"
+
+# Create recursive snapshot
+log "Creating recursive snapshot: $ZFS_FD_SOURCE_SNAP"
+echo "📸 Creating recursive snapshot..."
+if sudo zfs snapshot -r "$ZFS_FD_SOURCE_SNAP"; then
+    log "Snapshot created successfully: $ZFS_FD_SOURCE_SNAP"
+    echo "✅ Snapshot created: $ZFS_FD_SOURCE_SNAP"
+else
+    log "ERROR: Failed to create snapshot $ZFS_FD_SOURCE_SNAP"
+    echo "❌ Failed to create snapshot: $ZFS_FD_SOURCE_SNAP" >&2
+    exit 1
+fi
+
+# Add hold for safety
+log "Adding hold to snapshot for safety"
+echo "🔒 Adding safety hold..."
+if sudo zfs hold -r du_analysis_hold "$ZFS_FD_SOURCE_SNAP"; then
+    log "Hold added successfully"
+    echo "✅ Safety hold applied"
+else
+    log "ERROR: Failed to add hold"
+    echo "❌ Failed to add safety hold" >&2
+    exit 1
+fi
+
+# Create clone using zfsrclone
+log "Creating clone using zfsrclone..."
+echo "🔄 Creating clone..."
+if sudo ./zfsrclone --yes "$ZFS_FD_SOURCE_SNAP" "$CLONE_BASE"; then
+    log "Clone created successfully"
+    echo "✅ Clone created successfully"
+else
+    log "ERROR: Clone creation failed"
+    echo "❌ Clone creation failed" >&2
+    exit 1
+fi
+
+# Save environment to file for other scripts
+cat > "$ZFS_FD_RESULTS_DIR/environment.sh" << EOE
+# ZFS-DU Environment Variables
+# Source this file to set up environment for other scripts
+export ZFS_FD_TIMESTAMP="$ZFS_FD_TIMESTAMP"
+export ZFS_FD_SNAPTAG="$ZFS_FD_SNAPTAG"
+export ZFS_FD_SOURCE_SNAP="$ZFS_FD_SOURCE_SNAP"
+export ZFS_FD_CLONE_BASE="$ZFS_FD_CLONE_BASE"
+export ZFS_FD_RESULTS_DIR="$ZFS_FD_RESULTS_DIR"
+export ZFS_FD_LOG_FILE="$ZFS_FD_LOG_FILE"
+export ZFS_FD_DEPTH="$ZFS_FD_DEPTH"
+EOE
+
+# Save metadata
+cat > "$ZFS_FD_RESULTS_DIR/metadata.json" << EOM
+{
+  "timestamp": "$ZFS_FD_TIMESTAMP",
+  "snapshot_tag": "$ZFS_FD_SNAPTAG",
+  "source_snapshot": "$ZFS_FD_SOURCE_SNAP",
+  "clone_base": "$ZFS_FD_CLONE_BASE",
+  "default_depth": $ZFS_FD_DEPTH,
+  "results_directory": "$ZFS_FD_RESULTS_DIR",
+  "log_file": "$ZFS_FD_LOG_FILE",
+  "snapshot_created": true,
+  "hold_applied": true
+}
+EOM
+
+log "Environment setup complete"
+log "Results directory: $ZFS_FD_RESULTS_DIR"
+log "Log file: $ZFS_FD_LOG_FILE"
+log "Next: Run 'zfs-fd-mount' to mount cloned datasets"
+
+echo ""
+echo "✅ Snapshot and clone setup complete!"
+echo "📸 Created snapshot: $ZFS_FD_SNAPTAG"
+echo "📁 Results directory: $ZFS_FD_RESULTS_DIR"
+echo "📄 Log file: $ZFS_FD_LOG_FILE"
+echo "📄 Source environment: source $ZFS_FD_RESULTS_DIR/environment.sh"
+echo "▶️  Next step: zfs-fd-mount"
