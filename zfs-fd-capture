@@ -96,8 +96,13 @@ FILELIST_FILE="$RESULTS_DIR/filelist.txt"
 log "Capturing file metadata to $FILELIST_FILE"
 echo "📋 Capturing file metadata..."
 
+# Use --no-ignore to include files normally ignored by .gitignore
+# Use --hidden to include hidden files (starting with .)
+# Use sudo to ensure access to all directories regardless of permissions
+# Use --no-ignore to include files normally ignored by .gitignore
+# Use --hidden to include hidden files (starting with .)
 # Run the capture command
-fdfind --type f . "$MOUNT_BASE" --exec-batch stat --format='%s %n' > "$FILELIST_FILE"
+sudo fdfind --type f --no-ignore --hidden . "$MOUNT_BASE" --exec-batch stat --format='%s %n' > "$FILELIST_FILE"
 
 # Get file count and log success
 FILE_COUNT=$(wc -l < "$FILELIST_FILE")
