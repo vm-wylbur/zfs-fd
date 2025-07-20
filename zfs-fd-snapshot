@@ -10,6 +10,8 @@
 # Usage: zfs-fd-snapshot [source-dataset] [clone-destination]
 # 
 # Creates recursive snapshot and sets up environment for ZFS directory analysis
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # If no arguments provided, uses defaults for deep_chll/backup/nas
 
 set -euo pipefail
@@ -72,7 +74,7 @@ fi
 # Create clone using zfsrclone
 log "Creating clone using zfsrclone..."
 echo "🔄 Creating clone..."
-if sudo ./zfsrclone --yes "$ZFS_FD_SOURCE_SNAP" "$CLONE_BASE"; then
+if sudo "$SCRIPT_DIR/zfsrclone" --yes "$ZFS_FD_SOURCE_SNAP" "$CLONE_BASE"; then
     log "Clone created successfully"
     echo "✅ Clone created successfully"
 else
