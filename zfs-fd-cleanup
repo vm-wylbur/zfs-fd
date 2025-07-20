@@ -7,22 +7,16 @@
 # ------
 # zfs-fd/zfs-fd-cleanup
 #
-
 # ⚠️  CRITICAL WARNING ⚠️
-
 # CLONE_BASE must ALWAYS be deep_chll/tmp/zfs-fd-analysis
-
 # NEVER use deep_chll/backup/* as these are production datasets!
-
 # This script DESTROYS everything under CLONE_BASE - using the wrong path
-
 # could result in catastrophic data loss!
-
 #
-
-# Usage: zfs-fd-cleanup [--yes] [clone-base] [snapshot-tag]
+# Usage: zfs-fd-cleanup [--yes] [--holds-only] [clone-base] [snapshot-tag]
 # 
 # Cleans up cloned datasets and removes snapshots
+# ALWAYS releases holds to prevent blocking replication
 # Uses environment variables or accepts command line arguments
 
 set -euo pipefail
@@ -42,6 +36,7 @@ fi
 
 # Parse command line arguments
 SKIP_CONFIRMATION=false
+HOLDS_ONLY=false
 CLONE_BASE=""
 SNAPSHOT_TAG=""
 
@@ -51,8 +46,13 @@ while [[ $# -gt 0 ]]; do
             SKIP_CONFIRMATION=true
             shift
             ;;
-        -*)
+        --holds-only)
+            HOLDS_ONLY=true
+            shift
+            ;;
+        -*|--*)
             echo "Unknown option: $1" >&2
+            echo "Usage: $0 [--yes] [--holds-only] [clone-base] [snapshot-tag]" >&2
             exit 1
             ;;
         *)
@@ -68,37 +68,17 @@ done
 
 # Use environment variables if no command line arguments provided
 if [[ -z "$CLONE_BASE" ]]; then
-    # First try environment variable from loaded file
-    CLONE_BASE="${ZFS_FD_CLONE_BASE:-}"
-fi
-
-if [[ -z "$CLONE_BASE" ]]; then
-    CLONE_BASE="deep_chll/tmp/zfs-fd-analysis"
+    CLONE_BASE="${ZFS_FD_CLONE_BASE:-deep_chll/tmp/zfs-fd-analysis}"
 fi
 
 if [[ -z "$SNAPSHOT_TAG" ]]; then
-    # First try environment variable from loaded file
-    SNAPSHOT_TAG="${ZFS_FD_SNAPTAG:-}"
-fi
-
-# Use default if still empty
-if [[ -z "$SNAPSHOT_TAG" ]]; then
-    SNAPSHOT_TAG="zfs-fd"
-fi
-
-if [[ -z "$CLONE_BASE" ]]; then
-    echo "ERROR: No clone base specified"
-    echo "Either set ZFS_FD_CLONE_BASE or provide as argument:"
-    echo "  zfs-fd-cleanup [--yes] <clone-base> [snapshot-tag]"
-    echo "  (or run zfs-fd-snapshot first)"
-    exit 1
+    SNAPSHOT_TAG="${ZFS_FD_SNAPTAG:-zfs-fd}"
 fi
 
 # Set up logging
 if [[ -n "${ZFS_FD_LOG_FILE:-}" ]]; then
     LOG_FILE="$ZFS_FD_LOG_FILE"
 else
-    # Fallback if no environment
     LOG_FILE="/tmp/zfs-fd-cleanup-$(date -Iseconds).log"
 fi
 
@@ -107,261 +87,267 @@ log() {
     echo "$(date -Iseconds) [zfs-fd-cleanup] $1" | tee -a "$LOG_FILE"
 }
 
+# CRITICAL FUNCTION: Release all du-holder holds
+# This MUST succeed to prevent blocking replication
+release_all_du_holder_holds() {
+    echo ""
+    echo "🔓 CRITICAL: Checking for du-holder holds that block replication..."
+    log "Starting critical du-holder hold cleanup"
+    
+    # Find ALL du-holder snapshots across the entire system
+    local du_snapshots=$(zfs list -t snapshot -H -o name 2>/dev/null | grep "du-holder" || true)
+    
+    if [[ -z "$du_snapshots" ]]; then
+        echo "✅ No du-holder snapshots found"
+        log "No du-holder snapshots found"
+        return 0
+    fi
+    
+    local total_count=$(echo "$du_snapshots" | wc -l)
+    local holds_count=0
+    local released_count=0
+    local failed_count=0
+    
+    echo "Found $total_count du-holder snapshots, checking for holds..."
+    
+    # Check each snapshot for holds
+    while IFS= read -r snap; do
+        [[ -z "$snap" ]] && continue
+        
+        # Check if this snapshot has our hold
+        if sudo zfs holds -H "$snap" 2>/dev/null | grep -q "du_analysis_hold"; then
+            ((holds_count++))
+            log "Found hold on $snap"
+            
+            # Release the hold
+            if sudo zfs release du_analysis_hold "$snap" 2>&1; then
+                echo "✅ Released hold on: $snap"
+                log "Released hold on $snap"
+                ((released_count++))
+            else
+                echo "❌ FAILED to release hold on: $snap" >&2
+                log "ERROR: Failed to release hold on $snap"
+                ((failed_count++))
+            fi
+        fi
+    done <<< "$du_snapshots"
+    
+    echo ""
+    echo "📊 Hold cleanup summary:"
+    echo "   - Total du-holder snapshots: $total_count"
+    echo "   - Snapshots with holds: $holds_count"
+    echo "   - Holds released: $released_count"
+    echo "   - Failed releases: $failed_count"
+    
+    log "Hold cleanup complete: $total_count snapshots, $holds_count had holds, $released_count released, $failed_count failed"
+    
+    if [[ $failed_count -gt 0 ]]; then
+        echo ""
+        echo "⚠️  WARNING: Failed to release $failed_count holds!"
+        echo "   This WILL block replication. Manual intervention required."
+        log "WARNING: Failed to release $failed_count holds - replication may be blocked"
+        return 1
+    fi
+    
+    # Now offer to destroy the snapshots
+    if [[ $total_count -gt 0 ]] && [[ "$HOLDS_ONLY" == "false" ]]; then
+        echo ""
+        echo "🗑️  Found $total_count du-holder snapshots that can be destroyed"
+        
+        if [[ "$SKIP_CONFIRMATION" == "false" ]]; then
+            read -p "Destroy all du-holder snapshots? [y/N] " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                echo "Skipping snapshot destruction"
+                return 0
+            fi
+        fi
+        
+        local destroyed=0
+        local failed_destroy=0
+        
+        while IFS= read -r snap; do
+            [[ -z "$snap" ]] && continue
+            
+            if sudo zfs destroy "$snap" 2>/dev/null; then
+                echo "✅ Destroyed: $snap"
+                log "Destroyed snapshot $snap"
+                ((destroyed++))
+            else
+                echo "❌ Failed to destroy: $snap"
+                log "ERROR: Failed to destroy snapshot $snap"
+                ((failed_destroy++))
+            fi
+        done <<< "$du_snapshots"
+        
+        echo ""
+        echo "📊 Destroyed $destroyed snapshots, $failed_destroy failed"
+        log "Snapshot destruction: $destroyed destroyed, $failed_destroy failed"
+    fi
+    
+    return 0
+}
+
+# ALWAYS run hold cleanup first - this is CRITICAL
+release_all_du_holder_holds
+HOLD_CLEANUP_RESULT=$?
+
+# If only doing holds, exit now
+if [[ "$HOLDS_ONLY" == "true" ]]; then
+    echo ""
+    echo "✅ Hold cleanup complete (--holds-only mode)"
+    exit $HOLD_CLEANUP_RESULT
+fi
+
 log "Starting cleanup process"
 log "Clone base: $CLONE_BASE"
 log "Snapshot tag: $SNAPSHOT_TAG"
-CLONE_BASE_EXISTS=true
 
 # Check if clone base exists
+CLONE_BASE_EXISTS=true
 if ! zfs list "$CLONE_BASE" >/dev/null 2>&1; then
     echo "INFO: Clone base $CLONE_BASE does not exist - nothing to clean up"
     log "INFO: Clone base $CLONE_BASE does not exist"
     CLONE_BASE_EXISTS=false
 fi
-# Check for du-holder snapshots (outside of clone base check)
-DU_HOLDER_SNAPSHOTS=$(sudo zfs list -t snapshot -H -o name 2>/dev/null | grep "du-holder" || true)
-DU_HOLDER_COUNT=0
-if [[ -n "$DU_HOLDER_SNAPSHOTS" ]]; then
-    DU_HOLDER_COUNT=$(echo "$DU_HOLDER_SNAPSHOTS" | wc -l)
-fi
-
 
 if [[ "$CLONE_BASE_EXISTS" == "true" ]]; then
-# Get the root dataset name
-ROOT_CLONE_DATASET=$(zfs list -H -o name "$CLONE_BASE" 2>/dev/null | head -1)
-if [[ -z "$ROOT_CLONE_DATASET" ]]; then
-    echo "ERROR: Could not determine root clone dataset"
-    log "ERROR: Could not determine root clone dataset"
-    exit 1
-fi
+    # Get the root dataset name
+    ROOT_CLONE_DATASET=$(zfs list -H -o name "$CLONE_BASE" 2>/dev/null | head -1)
+    if [[ -z "$ROOT_CLONE_DATASET" ]]; then
+        echo "ERROR: Could not determine root clone dataset"
+        log "ERROR: Could not determine root clone dataset"
+        exit 1
+    fi
 
-# Get list of datasets to clean up
-DATASETS=$(zfs list -H -r -o name "$ROOT_CLONE_DATASET" | sort -r)  # Reverse order for proper cleanup
-DATASET_COUNT=$(echo "$DATASETS" | wc -l)
+    # Get list of datasets to clean up
+    DATASETS=$(zfs list -H -r -o name "$ROOT_CLONE_DATASET" | sort -r)  # Reverse order for proper cleanup
+    DATASET_COUNT=$(echo "$DATASETS" | wc -l)
 
-echo "🧹 Cleanup process starting..."
-echo "📁 Clone base: $CLONE_BASE"
-echo "📊 Datasets to remove: $DATASET_COUNT"
-
-# Show what will be cleaned up
-echo ""
-echo "Datasets to be destroyed:"
-echo "$DATASETS" | while read -r ds; do
-    echo "  - $ds"
-done
-
-# If we have snapshot info, show snapshot cleanup too
-if [[ -n "$SNAPSHOT_TAG" ]]; then
-    # Get the actual dataset name from the clone base
-    # Derive source dataset by removing the /tmp/zfs-fd-analysis suffix
-    SOURCE_DATASET=$(echo "$ROOT_CLONE_DATASET" | sed 's|/tmp/zfs-fd-analysis||')
-    
-    SOURCE_SNAP="${SOURCE_DATASET}@${SNAPSHOT_TAG}"
-    
     echo ""
-    echo "Snapshot cleanup:"
-    echo "  - Release hold on: $SOURCE_SNAP"
-    echo "  - Destroy snapshot: $SOURCE_SNAP"
-fi
+    echo "🧹 Cleanup process starting..."
+    echo "📁 Clone base: $CLONE_BASE"
+    echo "📊 Datasets to remove: $DATASET_COUNT"
 
-
-if [[ $DU_HOLDER_COUNT -gt 0 ]]; then
+    # Show what will be cleaned up
     echo ""
-    echo "⚠️  Found $DU_HOLDER_COUNT du-holder snapshots that block replication:"
-    echo "$DU_HOLDER_SNAPSHOTS" | while read -r snap; do
-        [[ -n "$snap" ]] && echo "  - $snap"
+    echo "Datasets to be destroyed:"
+    echo "$DATASETS" | while read -r ds; do
+        echo "  - $ds"
     done
-fi
 
-# Confirmation prompt
-if [[ "$SKIP_CONFIRMATION" == "false" ]]; then
-    echo ""
-    read -p "Proceed with cleanup? This will destroy all cloned datasets and snapshots. [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Cleanup cancelled."
-        log "Cleanup cancelled by user"
-        exit 0
-    fi
-fi
-
-# First check if there is anything to clean up
-CLONE_EXISTS=$(sudo zfs list -H -o name "$CLONE_BASE" 2>/dev/null || echo "")
-if [[ -z "$CLONE_EXISTS" ]]; then
-    echo "ℹ️  No clones found at $CLONE_BASE"
-    log "INFO: No clones found at $CLONE_BASE"
-fi
-
-if mount | grep -q "$CLONE_BASE"; then
-    echo "Found mounted filesystems at $CLONE_BASE"
-    log "Unmounting $CLONE_BASE"
-    if sudo umount -R "$CLONE_BASE" 2>/dev/null; then
-        echo "✅ Unmounted: $CLONE_BASE"
-        log "SUCCESS: Unmounted $CLONE_BASE"
-    else
-        echo "ℹ️  Dataset may have auto-unmounted, checking with force..." >&2
-        log "INFO: Standard unmount not needed, checking with force"
-        if sudo umount -f -R "$CLONE_BASE" 2>/dev/null; then
-            echo "✅ Force unmounted: $CLONE_BASE"
-            log "SUCCESS: Force unmounted $CLONE_BASE"
-        else
-            echo "ℹ️  Nothing to unmount (normal if datasets were already destroyed)" >&2
-            log "INFO: Nothing to unmount - proceeding with cleanup"
+    # Confirmation prompt
+    if [[ "$SKIP_CONFIRMATION" == "false" ]]; then
+        echo ""
+        read -p "Proceed with cleanup? This will destroy all cloned datasets. [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Cleanup cancelled."
+            log "Cleanup cancelled by user"
+            exit 0
         fi
     fi
-else
-    echo "✅ No filesystems mounted at $CLONE_BASE"
-    log "INFO: No filesystems mounted at $CLONE_BASE"
-fi
 
-# Step 2: Destroy datasets
-log "Starting dataset destruction"
-
-# Try recursive destruction first
-echo ""
-echo "🗑️  Destroying datasets..."
-if sudo zfs destroy -r "$ROOT_CLONE_DATASET" 2>/dev/null; then
-    echo "✅ Recursively destroyed all datasets under: $ROOT_CLONE_DATASET"
-    log "SUCCESS: Recursively destroyed $ROOT_CLONE_DATASET"
-    DESTROYED_COUNT=$DATASET_COUNT
-    FAILED_COUNT=0
-else
-    echo "⚠️  Recursive destroy failed, attempting individual destruction..."
-    log "WARNING: Recursive destroy failed, attempting individual destruction"
-    
-    # Fall back to individual destruction
-    DESTROYED_COUNT=0
-    FAILED_COUNT=0
-    
-    while IFS= read -r dataset; do
-        log "Destroying $dataset"
-        if sudo zfs destroy "$dataset" 2>/dev/null; then
-            echo "✅ Destroyed: $dataset"
-            log "SUCCESS: Destroyed $dataset"
-            ((DESTROYED_COUNT++))
+    # Check for mounts and unmount
+    if mount | grep -q "$CLONE_BASE"; then
+        echo "Found mounted filesystems at $CLONE_BASE"
+        log "Unmounting $CLONE_BASE"
+        if sudo umount -R "$CLONE_BASE" 2>/dev/null; then
+            echo "✅ Unmounted: $CLONE_BASE"
+            log "SUCCESS: Unmounted $CLONE_BASE"
         else
-            echo "❌ Failed to destroy: $dataset" >&2
-            log "ERROR: Failed to destroy $dataset"
-            ((FAILED_COUNT++))
-        fi
-    done <<< "$DATASETS"
-fi
-
-log "Dataset destruction complete: $DESTROYED_COUNT destroyed, $FAILED_COUNT failed"
-
-# Step 3: Clean up snapshot if we have the info
-if [[ -n "$SNAPSHOT_TAG" ]]; then
-    # Get the actual dataset name from the clone base
-    # Derive source dataset by removing the /tmp/zfs-fd-analysis suffix
-    SOURCE_DATASET=$(echo "$ROOT_CLONE_DATASET" | sed 's|/tmp/zfs-fd-analysis||')
-    SOURCE_SNAP="${SOURCE_DATASET}@${SNAPSHOT_TAG}"
-    ACTUAL_SNAP="${SOURCE_SNAP}"
-
-    echo ""
-    echo "🔒 Cleaning up snapshot..."
-    
-    # Release hold
-    log "Releasing hold on $SOURCE_SNAP"
-    if sudo zfs release -r du_analysis_hold "$SOURCE_SNAP" 2>/dev/null; then
-        echo "✅ Released hold on: $SOURCE_SNAP"
-        log "SUCCESS: Released hold on $SOURCE_SNAP"
-    else
-        echo "⚠️  Could not release hold on: $SOURCE_SNAP"
-        log "WARNING: Could not release hold on $SOURCE_SNAP"
-    fi
-    
-    # Destroy snapshot
-    log "Destroying snapshot $SOURCE_SNAP"
-    if sudo zfs destroy -r "$SOURCE_SNAP" 2>/dev/null; then
-        echo "✅ Destroyed snapshot: $SOURCE_SNAP"
-        log "SUCCESS: Destroyed snapshot $SOURCE_SNAP"
-    else
-        echo "⚠️  Could not destroy snapshot: $SOURCE_SNAP"
-        log "WARNING: Could not destroy snapshot $SOURCE_SNAP"
-    fi
-fi
-
-fi  # End of clone base exists check
-
-# Step 4: Clean up du-holder snapshots
-if [[ $DU_HOLDER_COUNT -gt 0 ]]; then
-    echo ""
-    echo "🔓 Cleaning up du-holder snapshots..."
-    
-    log "Processing du-holder snapshots"
-    DESTROYED_DU_HOLDERS=0
-    FAILED_DU_HOLDERS=0
-    SKIPPED_DU_HOLDERS=0
-    
-    for snap in $DU_HOLDER_SNAPSHOTS; do
-        # Check if it has any non-du_analysis_hold holds
-        if sudo zfs holds -H "$snap" 2>/dev/null | grep -v "du_analysis_hold" | grep -q .; then
-            echo "⚠️  SKIP: $snap has other holds"
-            log "WARNING: Skipping $snap - has other holds"
-            ((SKIPPED_DU_HOLDERS++))
-        else
-            # Release our hold and destroy
-            sudo zfs release du_analysis_hold "$snap" 2>/dev/null
-            if sudo zfs destroy "$snap" 2>/dev/null; then
-                echo "✅ Destroyed: $snap"
-                log "Destroyed du-holder snapshot $snap"
-                ((DESTROYED_DU_HOLDERS++))
+            echo "⚠️  Standard unmount failed, trying force unmount..."
+            log "WARNING: Standard unmount failed, trying force"
+            if sudo umount -f -R "$CLONE_BASE" 2>/dev/null; then
+                echo "✅ Force unmounted: $CLONE_BASE"
+                log "SUCCESS: Force unmounted $CLONE_BASE"
             else
-                echo "❌ Failed to destroy: $snap" >&2
-                log "ERROR: Failed to destroy du-holder snapshot $snap"
-                ((FAILED_DU_HOLDERS++))
+                echo "⚠️  Could not unmount, proceeding anyway..."
+                log "WARNING: Could not unmount, proceeding anyway"
             fi
         fi
-    done
-    
+    else
+        echo "✅ No filesystems mounted at $CLONE_BASE"
+        log "INFO: No filesystems mounted at $CLONE_BASE"
+    fi
+
+    # Destroy datasets
+    log "Starting dataset destruction"
     echo ""
-    echo "📊 Du-holder cleanup: $DESTROYED_DU_HOLDERS destroyed, $FAILED_DU_HOLDERS failed, $SKIPPED_DU_HOLDERS skipped"
-    log "Du-holder cleanup complete: $DESTROYED_DU_HOLDERS destroyed, $FAILED_DU_HOLDERS failed, $SKIPPED_DU_HOLDERS skipped"
+    echo "🗑️  Destroying datasets..."
+    
+    if sudo zfs destroy -r "$ROOT_CLONE_DATASET" 2>/dev/null; then
+        echo "✅ Recursively destroyed all datasets under: $ROOT_CLONE_DATASET"
+        log "SUCCESS: Recursively destroyed $ROOT_CLONE_DATASET"
+        DESTROYED_COUNT=$DATASET_COUNT
+        FAILED_COUNT=0
+    else
+        echo "⚠️  Recursive destroy failed, attempting individual destruction..."
+        log "WARNING: Recursive destroy failed, attempting individual destruction"
+        
+        DESTROYED_COUNT=0
+        FAILED_COUNT=0
+        
+        while IFS= read -r dataset; do
+            log "Destroying $dataset"
+            if sudo zfs destroy "$dataset" 2>/dev/null; then
+                echo "✅ Destroyed: $dataset"
+                log "SUCCESS: Destroyed $dataset"
+                ((DESTROYED_COUNT++))
+            else
+                echo "❌ Failed to destroy: $dataset" >&2
+                log "ERROR: Failed to destroy $dataset"
+                ((FAILED_COUNT++))
+            fi
+        done <<< "$DATASETS"
+    fi
+
+    log "Dataset destruction complete: $DESTROYED_COUNT destroyed, $FAILED_COUNT failed"
 fi
 
-# Step 5: Verification
+# Final verification
 echo ""
-echo "🔍 Verifying cleanup..."
+echo "🔍 Final verification..."
 
-# Check for remaining datasets
-REMAINING_DATASETS=$(zfs list -H -o name 2>/dev/null | grep -c "zfs-fd-analysis" || true)
-REMAINING_MOUNTS=$(mount | grep -c "$CLONE_BASE" || true)
-REMAINING_DU_HOLDERS=$(sudo zfs list -t snapshot -H -o name 2>/dev/null | grep -c "du-holder" || true)
+REMAINING_CLONES=$(zfs list -H -o name 2>/dev/null | grep -c "zfs-fd-analysis" || true)
+REMAINING_MOUNTS=$(mount | grep -c "${CLONE_BASE:-zfs-fd-analysis}" || true)
+REMAINING_DU_HOLDERS=$(zfs list -t snapshot -H -o name 2>/dev/null | grep -c "du-holder" || true)
 
-if [[ -n "$SNAPSHOT_TAG" ]]; then
-    REMAINING_SNAPSHOTS=$(zfs list -t snapshot -o name 2>/dev/null | grep -c "$SNAPSHOT_TAG" || true)
-else
-    REMAINING_SNAPSHOTS=0
-fi
-
-echo "  - Remaining clone datasets: $REMAINING_DATASETS"
+echo "  - Remaining clone datasets: $REMAINING_CLONES"
 echo "  - Remaining mount points: $REMAINING_MOUNTS"
 echo "  - Remaining du-holder snapshots: $REMAINING_DU_HOLDERS"
-if [[ -n "$SNAPSHOT_TAG" ]]; then
-    echo "  - Remaining snapshots: $REMAINING_SNAPSHOTS"
-fi
 
-log "Verification: $REMAINING_DATASETS datasets, $REMAINING_MOUNTS mounts, $REMAINING_SNAPSHOTS snapshots, $REMAINING_DU_HOLDERS du-holders remaining"
+log "Final verification: $REMAINING_CLONES clones, $REMAINING_MOUNTS mounts, $REMAINING_DU_HOLDERS du-holders"
 
 # Summary
-if [[ $REMAINING_DATASETS -gt 0 ]] || [[ $REMAINING_MOUNTS -gt 0 ]] || [[ $REMAINING_SNAPSHOTS -gt 0 ]] || [[ $REMAINING_DU_HOLDERS -gt 0 ]]; then
+if [[ $REMAINING_DU_HOLDERS -gt 0 ]]; then
     echo ""
-    echo "⚠️  Cleanup incomplete!"
-    echo "Some resources could not be cleaned up. Manual intervention may be required."
-    log "Cleanup incomplete - manual intervention required"
+    echo "⚠️  WARNING: $REMAINING_DU_HOLDERS du-holder snapshots remain!"
+    echo "   These may have holds that block replication."
+    echo "   Run: $0 --holds-only"
+    log "WARNING: $REMAINING_DU_HOLDERS du-holder snapshots remain"
+fi
+
+if [[ $REMAINING_CLONES -gt 0 ]] || [[ $REMAINING_MOUNTS -gt 0 ]]; then
+    echo ""
+    echo "⚠️  Some cleanup tasks incomplete"
+    log "Cleanup incomplete - manual intervention may be required"
     exit 1
 else
     echo ""
     echo "✅ Cleanup completed successfully!"
-    echo "🗑️  All datasets, mounts, snapshots, and du-holder snapshots have been removed"
-    log "Cleanup completed successfully - all resources removed"
+    echo "🗑️  All datasets and mounts have been removed"
+    if [[ $REMAINING_DU_HOLDERS -eq 0 ]]; then
+        echo "🔓 All du-holder snapshots have been cleaned up"
+    fi
+    log "Cleanup completed successfully"
 fi
 
 # Note about results
 if [[ -n "${ZFS_FD_RESULTS_DIR:-}" ]]; then
     echo ""
     echo "📄 Analysis results preserved at: $ZFS_FD_RESULTS_DIR"
-    echo "📄 Log file preserved at: $LOG_FILE"
+    echo "📄 Log file at: $LOG_FILE"
     log "Analysis results preserved at: $ZFS_FD_RESULTS_DIR"
 fi
 

@@ -107,3 +107,27 @@ This suite's breakthrough performance is made possible by:
 - **ZFS Special Vdev**: NVMe storage for metadata operations
 - **`stat`**: Efficient metadata extraction
 - **ZFS**: Snapshot and clone capabilities for safe analysis
+
+## Important: Cleanup and Replication
+
+The tool creates snapshots with holds to prevent accidental deletion during analysis. These holds **must** be released to avoid blocking ZFS replication.
+
+### Emergency Hold Cleanup
+
+If ZFS replication is blocked by du-holder snapshots:
+
+```bash
+# Release all holds (critical for replication)
+sudo ./zfs-fd cleanup --holds-only
+
+# Check for remaining du-holder snapshots
+zfs list -t snapshot | grep du-holder
+```
+
+The cleanup script now:
+- Always releases holds first (highest priority)
+- Searches system-wide for du-holder snapshots
+- Provides clear warnings if holds cannot be released
+- Can run with `--holds-only` for emergency cleanup
+
+The main workflow (`zfs-fd run`) includes automatic cleanup with error handling to prevent holds from being left behind.
