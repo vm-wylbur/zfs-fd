@@ -1,4 +1,13 @@
 #!/bin/bash
+#
+# Author: PB and Claude
+# Date: 2025-07-19
+# License: (c) HRDAG, 2025, GPL-2 or newer
+#
+# ------
+# zfs-fd/zfs-fd-dir-verify
+#
+
 # Verify directory coverage between clone and analysis.json
 
 MOUNT_BASE="/storage/tmp/zfs-fd-analysis"

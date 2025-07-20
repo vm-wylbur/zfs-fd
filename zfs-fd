@@ -5,6 +5,7 @@
 # License: (c) HRDAG, 2025, GPL-2 or newer
 #
 # ------
+# zfs-fd/zfs-fd
 # zfs-fd - Main wrapper for ZFS file distribution analysis workflow
 
 set -euo pipefail
@@ -110,7 +111,7 @@ run_complete_workflow() {
     # Parse arguments for the run command
     local SOURCE="${2:-}"
     local CLONE_BASE="${3:-}"
-    local OUTPUT_JSON="${4:-/tmp/zfs-fd-results/analysis.json}"
+    local OUTPUT_JSON=""  # Will be set after environment is loaded
 
     # Step 1: Snapshot
     echo "📸 Step 1/5: Creating snapshot and clones..." >&2
@@ -156,6 +157,11 @@ run_complete_workflow() {
     FILELIST="${ZFS_FD_RESULTS_DIR:-/tmp/zfs-fd-results}/filelist.txt"
     MOUNT_BASE="${ZFS_FD_MOUNT_BASE:-/storage/tmp/zfs-fd-analysis}"
 
+    # Now set the output JSON path in the same directory
+    if [[ -z "$OUTPUT_JSON" ]]; then
+        OUTPUT_JSON="${ZFS_FD_RESULTS_DIR}/analysis.json"
+    fi
+
     if [[ ! -f "$FILELIST" ]]; then
         echo "❌ Error: Filelist not found at $FILELIST" >&2
         exit 1
@@ -178,12 +184,19 @@ run_complete_workflow() {
     # Zstd compress the results
     echo "🗜 Compressing results..." >&2
     zstd -f "${FILELIST}" -o "${FILELIST}.zst" >&2
+    rm -f "${FILELIST}"
     zstd -f "${OUTPUT_JSON}" -o "${OUTPUT_JSON}.zst" >&2
+    rm -f "${OUTPUT_JSON}"
+
+    # Get the latest syncoid snapshot
+    DATASET="${SOURCE:-deep_chll/backup/nas}"
+    LATEST_SYNCOID=$(zfs list -t snapshot -o name -s creation | grep "^${DATASET}@syncoid" | tail -1 || echo "none")
+    echo "Latest syncoid snapshot: $LATEST_SYNCOID" >&2
 
     # Gather metadata
     METADATA_JSON="${OUTPUT_JSON/.json/_metadata.json}"
-    START_TIME="$(date -u --iso-8601=seconds)"
-    END_TIME="$(date -u --iso-8601=seconds)"
+    START_TIME="$(date --iso-8601=seconds)"
+    END_TIME="$(date --iso-8601=seconds)"
     cat <<END_METADATA > "$METADATA_JSON"
 {
   "analysis": {

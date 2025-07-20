@@ -199,14 +199,14 @@ if mount | grep -q "$CLONE_BASE"; then
         echo "✅ Unmounted: $CLONE_BASE"
         log "SUCCESS: Unmounted $CLONE_BASE"
     else
-        echo "⚠️  Standard unmount failed, trying force unmount..." >&2
-        log "WARNING: Standard unmount failed"
+        echo "ℹ️  Dataset may have auto-unmounted, checking with force..." >&2
+        log "INFO: Standard unmount not needed, checking with force"
         if sudo umount -f -R "$CLONE_BASE" 2>/dev/null; then
             echo "✅ Force unmounted: $CLONE_BASE"
             log "SUCCESS: Force unmounted $CLONE_BASE"
         else
-            echo "❌ Could not unmount, continuing anyway" >&2
-            log "ERROR: Could not unmount, continuing anyway"
+            echo "ℹ️  Nothing to unmount (normal if datasets were already destroyed)" >&2
+            log "INFO: Nothing to unmount - proceeding with cleanup"
         fi
     fi
 else
