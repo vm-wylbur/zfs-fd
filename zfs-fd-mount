@@ -6,6 +6,15 @@
 #
 # ------
 # zfs-fd/zfs-fd-mount
+#
+
+# ⚠️  CRITICAL WARNING ⚠️
+
+# CLONE_BASE must ALWAYS be deep_chll/tmp/zfs-fd-analysis
+
+# NEVER use deep_chll/backup/* as these are production datasets!
+
+#
 
 # Usage: zfs-fd-mount [clone-base]
 # 
@@ -14,6 +23,20 @@
 
 set -euo pipefail
 
+# First, try to load the latest environment file
+env_file=$(ls -t /var/lib/zfs-fd/*/environment.sh 2>/dev/null | head -n1)
+if [[ -f "$env_file" ]]; then
+    echo "📄 Loading environment from: $env_file"
+    source "$env_file"
+    # These are now available:
+    # ZFS_FD_TIMESTAMP, ZFS_FD_SNAPTAG, ZFS_FD_SOURCE_SNAP, 
+    # ZFS_FD_CLONE_BASE, ZFS_FD_RESULTS_DIR, ZFS_FD_LOG_FILE
+fi
+
+# If no environment file, we'll need command line args
+if [[ -z "$env_file" ]] || [[ ! -f "$env_file" ]]; then
+    echo "⚠️  No environment file found - will need command line arguments"
+fi
 # Check for environment variables or command line argument
 CLONE_BASE="${1:-${ZFS_FD_CLONE_BASE:-}}"
 
@@ -22,6 +45,9 @@ if [[ -z "$CLONE_BASE" ]]; then
     echo "Either set ZFS_FD_CLONE_BASE or provide as argument:"
     echo "  zfs-fd-mount <clone-base>"
     echo "  (or run zfs-fd-snapshot first)"
+    echo ""
+    echo "Hint: Run the scripts in order:"
+    echo "  1. zfs-fd-snapshot  2. zfs-fd-mount  3. zfs-fd-capture  4. zfs-fd-process"
     exit 1
 fi
 
@@ -101,7 +127,6 @@ if [[ -n "$ACTUAL_MOUNT_BASE" && -d "$ACTUAL_MOUNT_BASE" ]]; then
         # Update the environment file with correct mount base
         sed -i "s|export ZFS_FD_MOUNT_BASE=.*|export ZFS_FD_MOUNT_BASE=\"$ACTUAL_MOUNT_BASE\"|" "$ZFS_FD_RESULTS_DIR/environment.sh"
         export ZFS_FD_MOUNT_BASE="$ACTUAL_MOUNT_BASE"
-export ZFS_FD_MOUNT_BASE=/storage/tmp/zfs-fd-analysis
 
         log "Updated ZFS_FD_MOUNT_BASE: $ACTUAL_MOUNT_BASE"
     fi
@@ -114,11 +139,11 @@ export ZFS_FD_MOUNT_BASE=/storage/tmp/zfs-fd-analysis
     echo ""
     echo "🔍 Key datasets:"
     if [[ -d "$ACTUAL_MOUNT_BASE/home" ]]; then
-        HOME_SIZE=$(du -sh "$ACTUAL_MOUNT_BASE/home" 2>/dev/null | cut -f1 || echo "unknown")
+        HOME_SIZE="(size check disabled - too slow)"
         echo "  📁 home/ ($HOME_SIZE)"
     fi
     if [[ -d "$ACTUAL_MOUNT_BASE/zsd" ]]; then
-        ZSD_SIZE=$(du -sh "$ACTUAL_MOUNT_BASE/zsd" 2>/dev/null | cut -f1 || echo "unknown")
+        ZSD_SIZE="(size check disabled - too slow)"
         echo "  📁 zsd/ ($ZSD_SIZE)"
     fi
     
@@ -139,7 +164,7 @@ if [[ -n "$ZFS_FD_RESULTS_DIR" ]] && [[ -f "$ZFS_FD_RESULTS_DIR/environment.sh" 
     log "Updated environment file with mount base: $ACTUAL_MOUNT_BASE"
 fi
 
-log "All available datasets processed"
+log "All datasets mounted and ready"
 echo "✅ Mount process complete!"
 echo "📁 Ready for analysis at: $ACTUAL_MOUNT_BASE"
-echo "▶️  Next step: zfs-fd-capture --depth N"
+echo "▶️  Next step: zfs-fd-capture"

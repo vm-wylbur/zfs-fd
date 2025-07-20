@@ -1,0 +1,304 @@
+#!/bin/bash
+#
+# Author: PB and Claude
+# Date: 2025-07-20
+# License: (c) HRDAG, 2025, GPL-2 or newer
+#
+# ------
+# zfs-fd - Main wrapper for ZFS file distribution analysis workflow
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+show_help() {
+    cat << 'HELP'
+ZFS File Distribution Analysis Tool
+===================================
+
+Usage: zfs-fd [command] [options]
+
+Commands:
+  help      Show this help message
+  workflow  Show the complete workflow
+  status    Show current state (environment, clones, etc.)
+  run       Run the complete workflow (snapshot->mount->capture->cleanup->process)
+
+Individual Steps (run in order):
+  1. snapshot [source] [clone-base]  Create snapshot and clones
+  2. mount                           Mount cloned datasets
+  3. capture                         Capture file metadata
+  4. process                         Process data (see zfs-fd-process --help)
+  5. cleanup                         Clean up everything
+
+Quick Start (complete run):
+  sudo ./zfs-fd run [source] [clone-base] [output.json]
+      --json                   Run silently, outputting only JSON
+
+Or run steps individually:
+  sudo ./zfs-fd snapshot              # Uses defaults
+  sudo ./zfs-fd mount                 # Auto-loads environment
+  sudo ./zfs-fd capture               # Auto-loads environment
+  ./zfs-fd-process --help             # For processing options
+  sudo ./zfs-fd cleanup               # Auto-loads environment
+
+The scripts automatically share context via environment files.
+No need to pass arguments between steps!
+
+HELP
+}
+
+show_workflow() {
+    cat << 'WORKFLOW'
+ZFS-FD Complete Workflow
+========================
+
+The scripts work together in sequence:
+
+1. zfs-fd-snapshot [source] [clone-base]
+   - Creates snapshot with timestamp: du-holder-YYYY-MM-DD...
+   - Adds safety hold: du_analysis_hold
+   - Creates clones under clone-base
+   - Saves environment to /var/lib/zfs-fd/*/environment.sh
+
+2. zfs-fd-mount
+   - Loads environment automatically
+   - Mounts all cloned datasets
+   - Verifies mount success
+
+3. zfs-fd-capture
+   - Loads environment automatically
+   - Uses fd to capture file metadata
+   - Writes to results directory
+
+4. zfs-fd-process --input <filelist> --output <json> --base-path <path>
+   - Processes captured metadata
+   - Generates directory size analysis
+   - Outputs JSON report
+
+5. zfs-fd-cleanup
+   - Loads environment automatically
+   - Unmounts cloned filesystems
+   - Destroys clone datasets
+   - Releases snapshot holds
+   - Destroys snapshots
+
+Environment files ensure smooth handoff between scripts!
+WORKFLOW
+}
+
+run_complete_workflow() {
+    JSON_OUTPUT=${1:-false}
+    if [ "$JSON_OUTPUT" = "--json" ]; then
+        JSON_OUTPUT=true
+    else
+        JSON_OUTPUT=false
+    fi
+
+    echo "🚀 Starting complete ZFS-FD workflow" >&2
+    echo "===================================" >&2
+
+    # Check if we're running as root
+    if [[ $EUID -ne 0 ]]; then
+        echo "❌ Error: This command must be run with sudo" >&2
+        exit 1
+    fi
+
+    # Cleanup at start
+    "$SCRIPT_DIR/zfs-fd-cleanup" --yes || echo "⚠️  Initial cleanup had some issues" >&2
+
+    # Parse arguments for the run command
+    local SOURCE="${2:-}"
+    local CLONE_BASE="${3:-}"
+    local OUTPUT_JSON="${4:-/tmp/zfs-fd-results/analysis.json}"
+
+    # Step 1: Snapshot
+    echo "📸 Step 1/5: Creating snapshot and clones..." >&2
+    if ! "$SCRIPT_DIR/zfs-fd-snapshot" $SOURCE $CLONE_BASE; then
+        echo "❌ Snapshot creation failed" >&2
+        exit 1
+    fi
+    echo "✅ Snapshot complete" >&2
+    echo "" >&2
+
+    # Step 2: Mount
+    echo "🔌 Step 2/5: Mounting cloned datasets..." >&2
+    if ! "$SCRIPT_DIR/zfs-fd-mount"; then
+        echo "❌ Mount failed" >&2
+        exit 1
+    fi
+    echo "✅ Mount complete" >&2
+    echo "" >&2
+
+    # Step 3: Capture
+    echo "📊 Step 3/5: Capturing file metadata..." >&2
+    if ! "$SCRIPT_DIR/zfs-fd-capture"; then
+        echo "❌ Capture failed" >&2
+        exit 1
+    fi
+    echo "✅ Capture complete" >&2
+    echo "" >&2
+
+    # Load environment to get paths
+    env_file=$(ls -t /var/lib/zfs-fd/*/environment.sh 2>/dev/null | head -n1)
+    if [[ -f "$env_file" ]]; then
+        source "$env_file"
+    fi
+
+    # Step 4: Cleanup (before processing)
+    echo "🧹 Step 4/5: Cleanup" >&2
+    "$SCRIPT_DIR/zfs-fd-cleanup" --yes || echo "⚠️  Cleanup had some issues" >&2
+    echo "✅ Cleanup complete" >&2
+    echo "" >&2
+
+    # Step 5: Process data as the original user
+    echo "🔍 Step 5/5: Processing data..." >&2
+    FILELIST="${ZFS_FD_RESULTS_DIR:-/tmp/zfs-fd-results}/filelist.txt"
+    MOUNT_BASE="${ZFS_FD_MOUNT_BASE:-/storage/tmp/zfs-fd-analysis}"
+
+    if [[ ! -f "$FILELIST" ]]; then
+        echo "❌ Error: Filelist not found at $FILELIST" >&2
+        exit 1
+    fi
+
+    echo "  Input: $FILELIST" >&2
+    echo "  Output: $OUTPUT_JSON" >&2
+    echo "  Base path: $MOUNT_BASE" >&2
+
+    # Switch to original user
+    if [[ -n "$SUDO_USER" ]]; then
+        sudo -H -u "$SUDO_USER" bash -l -c "cd $PWD && $SCRIPT_DIR/zfs-fd-process --input $FILELIST --output $OUTPUT_JSON --base-path $MOUNT_BASE --progress"
+    else
+        "$SCRIPT_DIR/zfs-fd-process" --input "$FILELIST" --output "$OUTPUT_JSON" --base-path "$MOUNT_BASE" --progress
+    fi
+    
+    echo "✅ Processing complete" >&2
+    echo "" >&2
+
+    # Zstd compress the results
+    echo "🗜 Compressing results..." >&2
+    zstd -f "${FILELIST}" -o "${FILELIST}.zst" >&2
+    zstd -f "${OUTPUT_JSON}" -o "${OUTPUT_JSON}.zst" >&2
+
+    # Gather metadata
+    METADATA_JSON="${OUTPUT_JSON/.json/_metadata.json}"
+    START_TIME="$(date -u --iso-8601=seconds)"
+    END_TIME="$(date -u --iso-8601=seconds)"
+    cat <<END_METADATA > "$METADATA_JSON"
+{
+  "analysis": {
+    "start_time": "$START_TIME",
+    "end_time": "$END_TIME",
+    "version": "1.0"
+  },
+  "source": {
+    "dataset": "$SOURCE",
+    "syncoid_snapshot": "$LATEST_SYNCOID",
+    "clone_base": "$CLONE_BASE"
+  },
+  "results": {
+    "filelist_path": "${FILELIST}.zst",
+    "analysis_json_path": "${OUTPUT_JSON}.zst"
+  },
+  "environment": {
+    "hostname": "$(hostname)",
+    "user": "$(whoami)",
+    "mount_point": "$MOUNT_BASE"
+  }
+}
+END_METADATA
+
+    echo "🎉 Workflow complete!" >&2
+    echo "   Results saved to: $OUTPUT_JSON" >&2
+    echo "" >&2
+
+    # Output JSON if in JSON_OUTPUT mode
+    if [ "$JSON_OUTPUT" = true ]; then
+        echo "--- JSON OUTPUT START ---"
+        cat "$METADATA_JSON"
+        echo "--- JSON OUTPUT END ---"
+    fi
+}
+
+show_status() {
+    echo "ZFS-FD Status"
+    echo "============="
+
+    # Check for environment files
+    echo ""
+    echo "📄 Environment Files:"
+    if ls /var/lib/zfs-fd/*/environment.sh &>/dev/null; then
+        ls -lt /var/lib/zfs-fd/*/environment.sh | head -5
+    else
+        echo "  None found"
+    fi
+
+    # Check for clones
+    echo ""
+    echo "📁 Clone Datasets:"
+    if sudo zfs list -t filesystem | grep -q "zfs-fd-analysis"; then
+        sudo zfs list -t filesystem | grep "zfs-fd-analysis" | head -10
+    else
+        echo "  None found"
+    fi
+
+    # Check for snapshots
+    echo ""
+    echo "📸 Snapshots:"
+    if sudo zfs list -t snapshot | grep -q "du-holder"; then
+        sudo zfs list -t snapshot | grep "du-holder" | head -10
+    else
+        echo "  None found"
+    fi
+
+    # Check for result files
+    echo ""
+    echo "📊 Result Files:"
+    if ls /tmp/zfs-fd-results/filelist.txt &>/dev/null; then
+        ls -lh /tmp/zfs-fd-results/filelist.txt
+    else
+        echo "  None found"
+    fi
+}
+
+# Main command handling
+case "${1:-help}" in
+help|--help|-h)
+    show_help
+    ;;
+workflow)
+    show_workflow
+    ;;
+status)
+    show_status
+    ;;
+run)
+    shift
+    run_complete_workflow "$@"
+    ;;
+snapshot)
+    shift
+    exec "$SCRIPT_DIR/zfs-fd-snapshot" "$@"
+    ;;
+mount)
+    shift
+    exec "$SCRIPT_DIR/zfs-fd-mount" "$@"
+    ;;
+capture)
+    shift
+    exec "$SCRIPT_DIR/zfs-fd-capture" "$@"
+    ;;
+process)
+    shift
+    exec "$SCRIPT_DIR/zfs-fd-process" "$@"
+    ;;
+cleanup)
+    shift
+    exec "$SCRIPT_DIR/zfs-fd-cleanup" "$@"
+    ;;
+*)
+    echo "Unknown command: $1"
+    echo "Run 'zfs-fd help' for usage"
+    exit 1
+    ;;
+esac

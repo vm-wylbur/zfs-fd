@@ -7,7 +7,7 @@
 # ------
 # zfs-fd/zfs-fd-capture
 
-# Usage: zfs-fd-capture [--depth N] [mount-base]
+# Usage: zfs-fd-capture [mount-base]
 # 
 # Performs fast file metadata capture using fd + stat
 # Writes results to filelist.txt
@@ -25,17 +25,12 @@ else
 fi
 
 # Parse command line arguments
-DEPTH=""
 MOUNT_BASE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --depth)
-            DEPTH="$2"
-            shift 2
-            ;;
         --help)
-            echo "Usage: $0 [--depth N] [mount-base]"
+            echo "Usage: $0 [mount-base]"
             echo "Captures file metadata using fd + stat"
             exit 0
             ;;
@@ -53,14 +48,16 @@ done
 
 # Use environment variables if not provided
 MOUNT_BASE="${MOUNT_BASE:-$ZFS_FD_MOUNT_BASE}"
-DEPTH="${DEPTH:-$ZFS_FD_DEPTH}"
 
 # Validate required parameters
 if [[ -z "$MOUNT_BASE" ]]; then
     echo "ERROR: No mount base specified" >&2
     echo "Either set ZFS_FD_MOUNT_BASE or provide as argument:" >&2
-    echo "  zfs-fd-capture [--depth N] <mount-base>" >&2
+    echo "  zfs-fd-capture <mount-base>" >&2
     echo "  (or run zfs-fd-snapshot and zfs-fd-mount first)" >&2
+    echo ""
+    echo "Hint: Run the scripts in order:"
+    echo "  1. zfs-fd-snapshot  2. zfs-fd-mount  3. zfs-fd-capture  4. zfs-fd-process"
     exit 1
 fi
 
@@ -111,4 +108,4 @@ log "Capture complete: $FILE_COUNT files processed"
 echo "✅ Capture complete!"
 echo "📊 Files processed: $FILE_COUNT"
 echo "📄 Results file: $FILELIST_FILE"
-echo "▶️  Next step: zfs-fd-report (coming soon)"
+echo "▶️  Next step: zfs-fd-process --input $FILELIST_FILE --output analysis.json --base-path $MOUNT_BASE"
