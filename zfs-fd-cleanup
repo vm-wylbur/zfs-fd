@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # zfs-fd-cleanup - Robust cleanup of ZFS-FD resources
-# Version: 2.0 (2025-07-21)
+# Version: 2.1 (2025-07-21)
 #
 # Author: PB and Gemini
 # License: (c) HRDAG, 2025, GPL-2 or newer
@@ -100,29 +100,11 @@ destroy_snapshots() {
     echo
     echo "🗑️  Attempting to destroy '$SNAPSHOT_PATTERN' snapshots."
 
-    local snapshots_to_destroy
-    snapshots_to_destroy=$(sudo zfs list -t snapshot -H -o name 2>/dev/null | grep "$SNAPSHOT_PATTERN" || true)
+    local checked=0 destroyed=0 failed=0
 
-    if [[ -z "$snapshots_to_destroy" ]]; then
-        echo "✅ No '$SNAPSHOT_PATTERN' snapshots found to destroy."
-        return 0
-    fi
-
-    echo "The following snapshots will be destroyed:"
-    echo "$snapshots_to_destroy" | sed 's/^/  - /'
-
-    if [[ "$SKIP_CONFIRMATION" == "false" ]]; then
-        echo
-        read -p "Proceed with destroying these snapshots? [y/N] " -n 1 -r; echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "Cleanup cancelled by user."
-            return 1
-        fi
-    fi
-
-    local destroyed=0 failed=0
-
-    echo "$snapshots_to_destroy" | while IFS= read -r snap; do
+    # Using process substitution to avoid subshell scope issues for variables.
+    while IFS= read -r snap; do
+        ((checked++))
         if sudo zfs destroy "$snap"; then
             echo "✅ Destroyed: $snap"
             ((destroyed++))
@@ -130,14 +112,25 @@ destroy_snapshots() {
             echo "❌ Failed to destroy: $snap" >&2
             ((failed++))
         fi
-    done
+    done < <(sudo zfs list -t snapshot -H -o name 2>/dev/null | grep "$SNAPSHOT_PATTERN" || true)
 
     echo
     echo "📊 Snapshot Destruction Summary:"
+    echo "   - Snapshots found to destroy: $checked"
     echo "   - Successfully destroyed: $destroyed"
     echo "   - Failed to destroy: $failed"
 
-    if [[ $failed -gt 0 ]]; then return 1; fi
+    if [[ $failed -gt 0 ]]; then
+        echo "⚠️  WARNING: Failed to destroy $failed snapshots."
+        return 1
+    fi
+
+    if [[ $checked -eq 0 ]]; then
+        echo "✅ No '$SNAPSHOT_PATTERN' snapshots found to destroy."
+    fi
+
+    echo "✅ Snapshot destruction step completed."
+    return 0
 }
 
 

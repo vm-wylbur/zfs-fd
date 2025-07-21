@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Author: PB and Gemini
+# Date: 2025-07-21
+# License: (c) HRDAG, 2025, GPL-2 or newer
+#
+# ------
+# zfs-fd-process
 
 """
 ZFS-FD filelist processor: Convert raw file metadata into directory size analysis.
@@ -12,6 +18,7 @@ import sys
 import os
 import argparse
 import logging
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -19,7 +26,7 @@ import heapq
 import subprocess
 from datetime import datetime
 
-@dataclass 
+@dataclass
 class DirectoryStats:
     """Statistics for a directory at a specific depth level."""
     total_size: int = 0
@@ -30,59 +37,64 @@ class DirectoryStats:
 def process_filelist(input_path: str, base_path: str, depth: int = 3) -> dict:
     """
     Process filelist.txt into directory size analysis.
-    
+
     Args:
         input_path: Path to filelist.txt file
-        base_path: Base path to strip from file paths  
+        base_path: Base path to strip from file paths
         depth: Directory depth for aggregation
-        
+
     Returns:
         Dictionary with directory analysis results
     """
     logging.info(f"Processing {input_path} with base_path={base_path}, depth={depth}")
-    
+
+    # Compile the regex for performance, as discussed.
+    line_parser = re.compile(r'^(\d+)\s+(.*)$')
+
     base_path_obj = Path(base_path)
     directories = defaultdict(lambda: DirectoryStats())
     total_files = 0
     line_num = 0
-    
-    with open(input_path, 'r') as f:
+
+    # Open with surrogateescape to handle invalid filenames gracefully.
+    with open(input_path, 'r', encoding='utf-8', errors='surrogateescape') as f:
         for line in f:
             line_num += 1
             line = line.strip()
-            
+            if not line:
+                continue
+
             if line_num % 100000 == 0:
                 logging.debug(f"Processed {line_num:,} lines")
-            
+
             try:
-                parts = line.split('\t')
-                if len(parts) != 2:
-                    parts = line.split(' ', 1)
-                    if len(parts) != 2:
-                        logging.warning(f"Malformed line {line_num}: {line}")
-                        continue
-                        
-                size_str, full_path = parts
+                match = line_parser.match(line)
+                if not match:
+                    logging.warning(f"Malformed line {line_num}: {line}")
+                    continue
+
+                size_str, full_path = match.groups()
                 size = int(size_str)
                 total_files += 1
-                
+
                 full_path_obj = Path(full_path)
-                
+
                 try:
                     relative_path = full_path_obj.relative_to(base_path_obj)
                 except ValueError:
+                    # This can happen if a path is not under the base path, which is a valid warning.
                     logging.warning(f"Path not under base_path at line {line_num}: {full_path}")
                     continue
-                
+
                 # Build directory hierarchy up to specified depth
                 path_parts = relative_path.parts
-                
+
                 for d in range(1, min(len(path_parts) + 1, depth + 1)):
                     dir_key = '/'.join(path_parts[:d])
-                    
+
                     directories[dir_key].total_size += size
                     directories[dir_key].file_count += 1
-                    
+
                     if d == min(len(path_parts), depth):
                         # Store file info at the deepest level we're tracking
                         directories[dir_key].files.append({
@@ -90,45 +102,46 @@ def process_filelist(input_path: str, base_path: str, depth: int = 3) -> dict:
                             'size': size,
                             'path': str(relative_path)
                         })
-                        
+
             except Exception as e:
+                # Catch other potential errors, like ValueError from int() on a bad line
                 logging.warning(f"Error processing line {line_num}: {e}")
                 continue
-    
+
     logging.info(f"Processed {total_files:,} files into {len(directories):,} directories")
-    
+
     # Convert to serializable format
     result = {
         'directories': {},
         'summary': {
             'total_files': total_files,
-            'total_directories': len(directories), 
+            'total_directories': len(directories),
             'total_bytes': sum(d.total_size for d in directories.values() if '/' not in d.__dict__.get('path', ''))
         }
     }
-    
+
     for path, stats in directories.items():
         result['directories'][path] = {
             'total_size': stats.total_size,
             'file_count': stats.file_count,
             'files': stats.files[:100]  # Limit to top 100 files
         }
-    
+
     return result
 
 def setup_logging(console_level: str = "INFO", logfile: str = None):
     """Configure logging to console and optionally to file."""
-    
+
     # Set up console logging
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(getattr(logging, console_level.upper()))
-    console_format = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s', 
+    console_format = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s',
                                      datefmt='%H:%M:%S')
     console_handler.setFormatter(console_format)
-    
+
     # Configure root logger
     logging.basicConfig(level=logging.DEBUG, handlers=[console_handler])
-    
+
     # Add file logging if specified
     if logfile:
         file_handler = logging.FileHandler(logfile)
@@ -142,63 +155,63 @@ def main():
     parser = argparse.ArgumentParser(description="Process ZFS-FD filelist into directory size analysis")
     parser.add_argument('--input', required=True, help='Input filelist.txt path')
     parser.add_argument('--output', required=True, help='Output JSON file path')
-    parser.add_argument('--base-path', default=os.environ.get('ZFS_FD_MOUNT_BASE'), 
+    parser.add_argument('--base-path', default=os.environ.get('ZFS_FD_MOUNT_BASE'),
                        help='Base path to strip from file paths')
     parser.add_argument('--depth', type=int, default=3, help='Directory depth for aggregation')
     parser.add_argument('--logfile', help='Optional log file path')
     parser.add_argument('--progress', action='store_true', help='Show progress indicator')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
-    
+
     args = parser.parse_args()
-    
+
     # Setup logging
     console_level = "DEBUG" if args.verbose else "INFO"
     setup_logging(console_level, args.logfile)
-    
+
     logging.info("Starting zfs-fd-process")
-    
+
     try:
         result = process_filelist(args.input, args.base_path, args.depth)
-        
+
         with open(args.output, 'w') as f:
             json.dump(result, f, indent=2)
         logging.info(f"Output written to {args.output}")
-        
+
         if 'summary' in result:
             summary = result['summary']
             logging.info(f"Summary: {summary['total_files']:,} files, {summary['total_directories']:,} directories, {summary['total_bytes']:,} bytes")
-            
+
     except FileNotFoundError as e:
         logging.error(f"File not found: {e}")
         sys.exit(1)
     except Exception as e:
         logging.error(f"Processing error: {e}")
         sys.exit(1)
-    
+
     # Try to record timing in metadata
     try:
         results_dir = os.environ.get("ZFS_FD_RESULTS_DIR") or str(Path(args.output).parent)
         metadata_path = Path(results_dir) / "metadata.json"
-        
+
         if metadata_path.exists():
             try:
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
-                    
+
                 workflow_process_end = datetime.now().isoformat()
                 if 'workflow' not in metadata:
                     metadata['workflow'] = {}
                 metadata['workflow']['process_end'] = workflow_process_end
-                
+
                 with open(metadata_path, 'w') as f:
                     json.dump(metadata, f, indent=2)
                 logging.debug(f"Process timing recorded: {workflow_process_end}")
             except PermissionError:
                 logging.warning("Failed to update metadata with process timing")
-        
+
     except Exception as e:
         logging.warning(f"Could not record process timing: {e}")
-        
+
     logging.info("zfs-fd-process completed")
 
 if __name__ == "__main__":

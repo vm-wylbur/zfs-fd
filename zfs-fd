@@ -206,7 +206,7 @@ run_complete_workflow() {
     # Use JSON mode if requested
     if [ "$JSON_OUTPUT" = "true" ]; then
         # In JSON mode, suppress all output except the final JSON
-        if ! sudo -H -u "$ORIG_USER" bash -l -c "$SCRIPT_DIR/zfs-fd-process $FILELIST $OUTPUT_JSON" 2>&2; then
+        if ! sudo -H -u "$ORIG_USER" bash -l -c "$SCRIPT_DIR/zfs-fd-process --input $FILELIST --output $OUTPUT_JSON --base-path $ZFS_FD_MOUNT_BASE" 2>&2; then
             echo "❌ Process failed" >&2
             # Trap will handle cleanup
             exit 1
@@ -223,7 +223,7 @@ run_complete_workflow() {
         fi
     else
         # Normal mode - show all output
-        if ! sudo -H -u "$ORIG_USER" bash -l -c "$SCRIPT_DIR/zfs-fd-process $FILELIST $OUTPUT_JSON"; then
+        if ! sudo -H -u "$ORIG_USER" bash -l -c "$SCRIPT_DIR/zfs-fd-process --input $FILELIST --output $OUTPUT_JSON --base-path $ZFS_FD_MOUNT_BASE"; then
             echo "❌ Process failed" >&2
             # Trap will handle cleanup
             exit 1
