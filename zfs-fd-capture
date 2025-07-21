@@ -83,6 +83,15 @@ log "Starting fast file metadata capture using fd + stat"
 log "Mount base: $MOUNT_BASE"
 log "Results directory: $RESULTS_DIR"
 
+# Record capture start time
+ZFS_FD_WORKFLOW_CAPTURE_START=$(date -Iseconds)
+jq --arg start_time "$ZFS_FD_WORKFLOW_CAPTURE_START" \
+   ".analysis.capture_start_time = \$start_time" \
+   "${ZFS_FD_RESULTS_DIR}/metadata.json" > "${ZFS_FD_RESULTS_DIR}/metadata.json.tmp"
+mv "${ZFS_FD_RESULTS_DIR}/metadata.json.tmp" "${ZFS_FD_RESULTS_DIR}/metadata.json"
+
+log "Capture started at: $ZFS_FD_WORKFLOW_CAPTURE_START"
+
 echo "📋 Starting fast file metadata capture..."
 echo "📁 Mount base: $MOUNT_BASE"
 echo "💾 Results: $RESULTS_DIR"
@@ -104,6 +113,15 @@ sudo fdfind --type f --no-ignore --hidden . "$MOUNT_BASE" --exec-batch stat --fo
 # Get file count and log success
 FILE_COUNT=$(wc -l < "$FILELIST_FILE")
 log "Capture complete: $FILE_COUNT files processed"
+
+# Record capture end time
+ZFS_FD_WORKFLOW_CAPTURE_END=$(date -Iseconds)
+jq --arg end_time "$ZFS_FD_WORKFLOW_CAPTURE_END" \
+   ".analysis.capture_end_time = \$end_time" \
+   "${ZFS_FD_RESULTS_DIR}/metadata.json" > "${ZFS_FD_RESULTS_DIR}/metadata.json.tmp"
+mv "${ZFS_FD_RESULTS_DIR}/metadata.json.tmp" "${ZFS_FD_RESULTS_DIR}/metadata.json"
+
+log "Capture completed at: $ZFS_FD_WORKFLOW_CAPTURE_END"
 
 echo "✅ Capture complete!"
 echo "📊 Files processed: $FILE_COUNT"

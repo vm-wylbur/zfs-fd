@@ -88,6 +88,9 @@ HELP
 }
 
 run_complete_workflow() {
+    # Record workflow start time
+    ZFS_FD_WORKFLOW_START=$(date -Iseconds)
+    
     JSON_OUTPUT=${1:-false}
     if [ "$JSON_OUTPUT" = "--json" ]; then
         JSON_OUTPUT=true
@@ -123,7 +126,12 @@ run_complete_workflow() {
     fi
 
     # Cleanup at start
-    "$SCRIPT_DIR/zfs-fd-cleanup" --yes || echo "⚠️  Initial cleanup had some issues" >&2
+    if ! "$SCRIPT_DIR/zfs-fd-cleanup" --yes; then
+        echo "❌ CRITICAL: Initial cleanup failed!" >&2
+        echo "   Cannot proceed safely with existing datasets/snapshots" >&2
+        echo "   Run manually: sudo $SCRIPT_DIR/zfs-fd-cleanup --yes" >&2
+        exit 1
+    fi
 
     # Parse arguments for the run command
     local SOURCE="${2:-}"
@@ -198,7 +206,7 @@ run_complete_workflow() {
     # Use JSON mode if requested
     if [ "$JSON_OUTPUT" = "true" ]; then
         # In JSON mode, suppress all output except the final JSON
-        if ! sudo -u "$ORIG_USER" -E "$SCRIPT_DIR/zfs-fd-process" "$FILELIST" "$OUTPUT_JSON" 2>&2; then
+        if ! sudo -H -u "$ORIG_USER" bash -l -c "$SCRIPT_DIR/zfs-fd-process $FILELIST $OUTPUT_JSON" 2>&2; then
             echo "❌ Process failed" >&2
             # Trap will handle cleanup
             exit 1
@@ -215,7 +223,7 @@ run_complete_workflow() {
         fi
     else
         # Normal mode - show all output
-        if ! sudo -u "$ORIG_USER" -E "$SCRIPT_DIR/zfs-fd-process" "$FILELIST" "$OUTPUT_JSON"; then
+        if ! sudo -H -u "$ORIG_USER" bash -l -c "$SCRIPT_DIR/zfs-fd-process $FILELIST $OUTPUT_JSON"; then
             echo "❌ Process failed" >&2
             # Trap will handle cleanup
             exit 1
@@ -225,6 +233,17 @@ run_complete_workflow() {
 
         echo "🎉 Workflow complete!" >&2
         echo "Results available at: ${ZFS_FD_RESULTS_DIR}" >&2
+    fi
+    
+    # Record workflow end time and update metadata
+    ZFS_FD_WORKFLOW_END=$(date -Iseconds)
+    
+    if [[ -f "$env_file" && -f "${ZFS_FD_RESULTS_DIR}/metadata.json" ]]; then
+        jq --arg start_time "$ZFS_FD_WORKFLOW_START" \
+           --arg end_time "$ZFS_FD_WORKFLOW_END" \
+           '.analysis.workflow_start_time = $start_time | .analysis.workflow_end_time = $end_time' \
+           "${ZFS_FD_RESULTS_DIR}/metadata.json" > "${ZFS_FD_RESULTS_DIR}/metadata.json.tmp"
+        mv "${ZFS_FD_RESULTS_DIR}/metadata.json.tmp" "${ZFS_FD_RESULTS_DIR}/metadata.json"
     fi
     
     # Clear the trap since we completed successfully

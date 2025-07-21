@@ -1,23 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.13"
-# dependencies = [
-#     "typer",
-#     "loguru",
-# ]
-# ///
-
-# Author: PB and Claude
-# Date: 2025-07-18
-# Date: 2025-07-18
-# License: (c) HRDAG, 2025, GPL-2 or newer
-#
-# ------
-# zfs-fd/zfs-fd-process
-# License: (c) HRDAG, 2025, GPL-2 or newer
-#
-# ------
-# zfs-fd/zfs-fd-process
+#!/usr/bin/env python3
 
 """
 ZFS-FD filelist processor: Convert raw file metadata into directory size analysis.
@@ -29,195 +10,196 @@ size analysis with configurable depth aggregation.
 import json
 import sys
 import os
+import argparse
+import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from collections import defaultdict
 import heapq
+import subprocess
+from datetime import datetime
 
-import typer
-from loguru import logger
-
-
-@dataclass
-class FileEntry:
-    """Represents a file with path and size."""
-    path: str
-    size: int
-    
-    def __lt__(self, other):
-        """Enable comparison for heapq operations."""
-        return self.size < other.size
-
-
-@dataclass  
+@dataclass 
 class DirectoryStats:
-    """Statistics for a directory."""
+    """Statistics for a directory at a specific depth level."""
     total_size: int = 0
     file_count: int = 0
-    largest_files: list[FileEntry] = field(default_factory=list)
-    
-    def add_file(self, file_entry: FileEntry) -> None:
-        """Add a file to this directory's stats."""
-        self.total_size += file_entry.size
-        self.file_count += 1
-        
-        # Track largest files (top 10) using min-heap
-        if len(self.largest_files) < 10:
-            heapq.heappush(self.largest_files, file_entry)
-        elif file_entry.size > self.largest_files[0].size:
-            heapq.heappushpop(self.largest_files, file_entry)
-    
-    def to_dict(self) -> dict:
-        """Convert to dictionary format for JSON output."""
-        # Sort largest files by size descending
-        sorted_files = [
-            {"path": entry.path, "size": entry.size}
-            for entry in sorted(self.largest_files, key=lambda x: x.size, reverse=True)
-        ]
-        
-        return {
-            "total_size": self.total_size,
-            "file_count": self.file_count, 
-            "largest_files": sorted_files
-        }
-
+    files: list = field(default_factory=list)
+    subdirs: dict = field(default_factory=dict)
 
 def process_filelist(input_path: str, base_path: str, depth: int = 3) -> dict:
     """
     Process filelist.txt into directory size analysis.
     
     Args:
-        input_path: Path to filelist.txt (format: "size /full/path")
+        input_path: Path to filelist.txt file
         base_path: Base path to strip from file paths  
         depth: Directory depth for aggregation
         
     Returns:
-        Dict with 'summary' and 'directories' keys
+        Dictionary with directory analysis results
     """
-    logger.info(f"Processing {input_path} with base_path={base_path}, depth={depth}")
+    logging.info(f"Processing {input_path} with base_path={base_path}, depth={depth}")
     
     base_path_obj = Path(base_path)
-    directories = defaultdict(DirectoryStats)
-    total_bytes = 0
+    directories = defaultdict(lambda: DirectoryStats())
     total_files = 0
+    line_num = 0
     
-    with open(input_path, 'r', encoding='utf-8', errors='replace') as f:
-        for line_num, line in enumerate(f, 1):
-            if line_num % 100_000 == 0:
-                logger.debug(f"Processed {line_num:,} lines")
-                
+    with open(input_path, 'r') as f:
+        for line in f:
+            line_num += 1
             line = line.strip()
-            if not line:
-                continue
-                
+            
+            if line_num % 100000 == 0:
+                logging.debug(f"Processed {line_num:,} lines")
+            
             try:
-                # Parse: "filesize /full/path"  
-                parts = line.split(' ', 1)
+                parts = line.split('\t')
                 if len(parts) != 2:
-                    logger.warning(f"Malformed line {line_num}: {line}")
-                    continue
-                    
+                    parts = line.split(' ', 1)
+                    if len(parts) != 2:
+                        logging.warning(f"Malformed line {line_num}: {line}")
+                        continue
+                        
                 size_str, full_path = parts
                 size = int(size_str)
+                total_files += 1
                 
-                # Convert to relative path using pathlib
                 full_path_obj = Path(full_path)
+                
                 try:
                     relative_path = full_path_obj.relative_to(base_path_obj)
                 except ValueError:
-                    logger.warning(f"Path not under base_path at line {line_num}: {full_path}")
+                    logging.warning(f"Path not under base_path at line {line_num}: {full_path}")
                     continue
                 
-                # Truncate to depth for aggregation key
-                if len(relative_path.parts) > depth:
-                    dir_key = str(Path(*relative_path.parts[:depth]))
-                else:
-                    # Handle files at or above the depth limit
-                    if relative_path.parent != Path('.'):
-                        dir_key = str(relative_path.parent)
-                    else:
-                        dir_key = str(relative_path.parts[0]) if relative_path.parts else '.'
+                # Build directory hierarchy up to specified depth
+                path_parts = relative_path.parts
                 
-                # Create file entry and add to directory stats
-                file_entry = FileEntry(path=str(relative_path), size=size)
-                directories[dir_key].add_file(file_entry)
-                
-                total_bytes += size
-                total_files += 1
+                for d in range(1, min(len(path_parts) + 1, depth + 1)):
+                    dir_key = '/'.join(path_parts[:d])
                     
-            except (ValueError, IndexError) as e:
-                logger.warning(f"Error processing line {line_num}: {e}")
+                    directories[dir_key].total_size += size
+                    directories[dir_key].file_count += 1
+                    
+                    if d == min(len(path_parts), depth):
+                        # Store file info at the deepest level we're tracking
+                        directories[dir_key].files.append({
+                            'name': path_parts[-1] if len(path_parts) == d else f"{path_parts[d-1]}/...",
+                            'size': size,
+                            'path': str(relative_path)
+                        })
+                        
+            except Exception as e:
+                logging.warning(f"Error processing line {line_num}: {e}")
                 continue
     
-    logger.info(f"Processed {total_files:,} files into {len(directories):,} directories")
+    logging.info(f"Processed {total_files:,} files into {len(directories):,} directories")
     
-    return {
+    # Convert to serializable format
+    result = {
+        'directories': {},
         'summary': {
-            'total_directories': len(directories),
-            'total_bytes': total_bytes,
-            'total_files': total_files
-        },
-        'directories': {k: v.to_dict() for k, v in directories.items()}
+            'total_files': total_files,
+            'total_directories': len(directories), 
+            'total_bytes': sum(d.total_size for d in directories.values() if '/' not in d.__dict__.get('path', ''))
+        }
     }
-
-
-def configure_logging(verbose: bool, progress: bool, logfile: str = None) -> None:
-    """Configure loguru to log to console and optionally to file."""
-    logger.remove()  # Remove default handler
     
-    # Console logging
-    console_level = "DEBUG" if verbose else ("INFO" if progress else "WARNING")
-    logger.add(sys.stderr, level=console_level, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | {message}")
+    for path, stats in directories.items():
+        result['directories'][path] = {
+            'total_size': stats.total_size,
+            'file_count': stats.file_count,
+            'files': stats.files[:100]  # Limit to top 100 files
+        }
     
-    # File logging if specified
+    return result
+
+def setup_logging(console_level: str = "INFO", logfile: str = None):
+    """Configure logging to console and optionally to file."""
+    
+    # Set up console logging
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(getattr(logging, console_level.upper()))
+    console_format = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s', 
+                                     datefmt='%H:%M:%S')
+    console_handler.setFormatter(console_format)
+    
+    # Configure root logger
+    logging.basicConfig(level=logging.DEBUG, handlers=[console_handler])
+    
+    # Add file logging if specified
     if logfile:
-        # Ensure log directory exists
-        log_path = Path(logfile)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        logger.add(
-            logfile, 
-            level="DEBUG", 
-            format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
-            mode="a"  # Append to existing log file
-        )
-        logger.debug(f"Logging to file: {logfile}")
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setLevel(logging.DEBUG)
+        file_format = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s')
+        file_handler.setFormatter(file_format)
+        logging.getLogger().addHandler(file_handler)
+        logging.debug(f"Logging to file: {logfile}")
 
-
-def main(
-    input: str = typer.Option(..., help="Input filelist.txt path"),
-    output: str = typer.Option(..., help="Output JSON file path"), 
-    base_path: str = typer.Option(..., help="Base path to strip from file paths"),
-    depth: int = typer.Option(3, help="Directory depth for aggregation"),
-    logfile: str = typer.Option(None, help="Optional log file path"),
-    progress: bool = typer.Option(False, help="Show progress indicator"),
-    verbose: bool = typer.Option(False, help="Enable verbose logging")
-) -> None:
-    """Process ZFS-FD filelist into directory size analysis."""
+def main():
+    parser = argparse.ArgumentParser(description="Process ZFS-FD filelist into directory size analysis")
+    parser.add_argument('--input', required=True, help='Input filelist.txt path')
+    parser.add_argument('--output', required=True, help='Output JSON file path')
+    parser.add_argument('--base-path', default=os.environ.get('ZFS_FD_MOUNT_BASE'), 
+                       help='Base path to strip from file paths')
+    parser.add_argument('--depth', type=int, default=3, help='Directory depth for aggregation')
+    parser.add_argument('--logfile', help='Optional log file path')
+    parser.add_argument('--progress', action='store_true', help='Show progress indicator')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     
-    configure_logging(verbose, progress, logfile)
-    logger.info("Starting zfs-fd-process")
+    args = parser.parse_args()
+    
+    # Setup logging
+    console_level = "DEBUG" if args.verbose else "INFO"
+    setup_logging(console_level, args.logfile)
+    
+    logging.info("Starting zfs-fd-process")
     
     try:
-        result = process_filelist(input, base_path, depth)
+        result = process_filelist(args.input, args.base_path, args.depth)
         
-        with open(output, 'w') as f:
+        with open(args.output, 'w') as f:
             json.dump(result, f, indent=2)
-            
-        logger.success(f"Output written to {output}")
-        if progress:
+        logging.info(f"Output written to {args.output}")
+        
+        if 'summary' in result:
             summary = result['summary']
-            logger.info(f"Summary: {summary['total_files']:,} files, {summary['total_directories']:,} directories, {summary['total_bytes']:,} bytes")
+            logging.info(f"Summary: {summary['total_files']:,} files, {summary['total_directories']:,} directories, {summary['total_bytes']:,} bytes")
             
     except FileNotFoundError as e:
-        logger.error(f"File not found: {e}")
-        raise typer.Exit(1)
+        logging.error(f"File not found: {e}")
+        sys.exit(1)
     except Exception as e:
-        logger.error(f"Processing error: {e}")
-        raise typer.Exit(1)
-    finally:
-        logger.info("zfs-fd-process completed")
-
+        logging.error(f"Processing error: {e}")
+        sys.exit(1)
+    
+    # Try to record timing in metadata
+    try:
+        results_dir = os.environ.get("ZFS_FD_RESULTS_DIR") or str(Path(args.output).parent)
+        metadata_path = Path(results_dir) / "metadata.json"
+        
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                    
+                workflow_process_end = datetime.now().isoformat()
+                if 'workflow' not in metadata:
+                    metadata['workflow'] = {}
+                metadata['workflow']['process_end'] = workflow_process_end
+                
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                logging.debug(f"Process timing recorded: {workflow_process_end}")
+            except PermissionError:
+                logging.warning("Failed to update metadata with process timing")
+        
+    except Exception as e:
+        logging.warning(f"Could not record process timing: {e}")
+        
+    logging.info("zfs-fd-process completed")
 
 if __name__ == "__main__":
-    typer.run(main)
+    main()

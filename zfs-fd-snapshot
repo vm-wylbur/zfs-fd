@@ -99,15 +99,24 @@ EOE
 # Save metadata
 cat > "$ZFS_FD_RESULTS_DIR/metadata.json" << EOM
 {
-  "timestamp": "$ZFS_FD_TIMESTAMP",
-  "snapshot_tag": "$ZFS_FD_SNAPTAG",
-  "source_snapshot": "$ZFS_FD_SOURCE_SNAP",
-  "clone_base": "$ZFS_FD_CLONE_BASE",
-  "default_depth": $ZFS_FD_DEPTH,
-  "results_directory": "$ZFS_FD_RESULTS_DIR",
-  "log_file": "$ZFS_FD_LOG_FILE",
-  "snapshot_created": true,
-  "hold_applied": true
+  "analysis": {
+    "timestamp": "$ZFS_FD_TIMESTAMP",
+    "snapshot_tag": "$ZFS_FD_SNAPTAG",
+    "default_depth": $ZFS_FD_DEPTH
+  },
+  "source": {
+    "dataset": "$SOURCE_DATASET",
+    "snapshot": "$ZFS_FD_SOURCE_SNAP",
+    "snapshot_created": true,
+    "hold_applied": true
+  },
+  "results": {
+    "directory": "$ZFS_FD_RESULTS_DIR",
+    "log_file": "$ZFS_FD_LOG_FILE"
+  },
+  "environment": {
+    "clone_base": "$ZFS_FD_CLONE_BASE"
+  }
 }
 EOM
 
