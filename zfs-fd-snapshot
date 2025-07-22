@@ -17,7 +17,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set -euo pipefail
 
 # Default values
-DEFAULT_SOURCE="deep_chll/backup/nas"
+if sudo zfs list -H -o name "deep_chll/backup/nas" >/dev/null 2>&1; then
+    DEFAULT_SOURCE="deep_chll/backup/nas"
+else
+    DEFAULT_SOURCE="deep_chll/backup"
+fi
 DEFAULT_CLONE_BASE="deep_chll/tmp/zfs-fd-analysis"
 
 # Parse arguments

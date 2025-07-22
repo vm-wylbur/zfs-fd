@@ -1,3 +1,7 @@
+#---
+# **Status**: This work is complete and integrated into the `zfs-fd-cleanup` script.
+#---
+
 # ZFS-FD Cleanup Fix Summary
 
 ## The Problem
