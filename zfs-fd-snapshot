@@ -52,8 +52,8 @@ log "Clone destination: $CLONE_BASE"
 log "Snapshot tag: $ZFS_FD_SNAPTAG"
 
 # Get latest snapshot name and GUID before creating a new one
-ZFS_FD_PREVIOUS_SNAP_NAME=$(zfs list -r -t snapshot -o name -s creation "${SOURCE_DATASET}" | tail -n1)
-ZFS_FD_PREVIOUS_SNAP_GUID=$(zfs list -r -t snapshot -o guid -s creation "${SOURCE_DATASET}" | tail -n1)
+ZFS_FD_PREVIOUS_SNAP_NAME=$(zfs list -t snapshot -o name -s creation "${SOURCE_DATASET}" | tail -n1)
+ZFS_FD_PREVIOUS_SNAP_GUID=$(zfs list -t snapshot -o guid -s creation "${SOURCE_DATASET}" | tail -n1)
 # Create recursive snapshot
 log "Creating recursive snapshot: $ZFS_FD_SOURCE_SNAP"
 echo "📸 Creating recursive snapshot..."
