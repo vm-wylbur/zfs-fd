@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLONE_BASE=""
 SNAPSHOT_TAG=""
 SOURCE=""
+RUN_ID=""
 
 # --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
@@ -16,14 +17,16 @@ while [[ $# -gt 0 ]]; do
       SNAPSHOT_TAG="$2"; shift; shift ;;
     --source)
       SOURCE="$2"; shift; shift ;;
+    --run-id)
+      RUN_ID="$2"; shift; shift ;;
     *)
-      echo "Usage: $0 --source <pool/fs> --clone-base <pool/fs> --snapshot-tag <tag>" >&2
+      echo "Usage: $0 --source <pool/fs> --clone-base <pool/fs> --snapshot-tag <tag> [--run-id <id>]" >&2
       exit 1 ;;
   esac
 done
 
 if [ -z "$SOURCE" ] || [ -z "$CLONE_BASE" ] || [ -z "$SNAPSHOT_TAG" ]; then
-    echo "Error: All arguments are required." >&2
+    echo "Error: All required arguments are not provided." >&2
     exit 1
 fi
 
@@ -36,5 +39,13 @@ zfs hold du_analysis_hold "$SOURCE@$SNAPSHOT_TAG"
 
 log "Cloning snapshot to $CLONE_BASE"
 "$SCRIPT_DIR/zfsrclone" --yes "$SOURCE@$SNAPSHOT_TAG" "$CLONE_BASE"
+
+# The controller creates the results dir, we just need to know where it is
+results_dir=$(dirname "$(ls -t /var/lib/zfs-fd/*/environment.sh | head -n1)")
+if [ -d "$results_dir" ]; then
+    log "Adding run-id to metadata."
+    jq --arg run_id "${RUN_ID:-}" '.analysis.run_id = $run_id' "$results_dir/metadata.json" > "$results_dir/metadata.json.tmp" && mv "$results_dir/metadata.json.tmp" "$results_dir/metadata.json"
+fi
+
 log "✅ Snapshot and clone process complete."
 
