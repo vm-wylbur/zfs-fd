@@ -1,143 +1,40 @@
 #!/bin/bash
-#
-# Author: PB and Claude
-# Date: 2025-07-18
-# License: (c) HRDAG, 2025, GPL-2 or newer
-#
-# ------
-# zfs-fd/zfs-fd-snapshot
-
-# Usage: zfs-fd-snapshot [source-dataset] [clone-destination]
-# 
-# Creates recursive snapshot and sets up environment for ZFS directory analysis
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# If no arguments provided, uses defaults for deep_chll/backup/nas
-
+# Standalone snapshot worker
 set -euo pipefail
 
-# Default values
-if sudo zfs list -H -o name "deep_chll/backup/nas" >/dev/null 2>&1; then
-    DEFAULT_SOURCE="deep_chll/backup/nas"
-else
-    DEFAULT_SOURCE="deep_chll/backup"
-fi
-DEFAULT_CLONE_BASE="deep_chll/tmp/zfs-fd-analysis"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLONE_BASE=""
+SNAPSHOT_TAG=""
+SOURCE=""
 
-# Parse arguments
-SOURCE_DATASET="${1:-$DEFAULT_SOURCE}"
-CLONE_BASE="${2:-$DEFAULT_CLONE_BASE}"
+# --- Argument Parsing ---
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --clone-base)
+      CLONE_BASE="$2"; shift; shift ;;
+    --snapshot-tag)
+      SNAPSHOT_TAG="$2"; shift; shift ;;
+    --source)
+      SOURCE="$2"; shift; shift ;;
+    *)
+      echo "Usage: $0 --source <pool/fs> --clone-base <pool/fs> --snapshot-tag <tag>" >&2
+      exit 1 ;;
+  esac
+done
 
-# Set up environment variables
-export ZFS_FD_TIMESTAMP="$(date -Iseconds)"
-export ZFS_FD_SNAPTAG="du-holder-${ZFS_FD_TIMESTAMP}"
-export ZFS_FD_SOURCE_SNAP="${SOURCE_DATASET}@${ZFS_FD_SNAPTAG}"
-export ZFS_FD_CLONE_BASE="$CLONE_BASE"
-export ZFS_FD_RESULTS_DIR="/var/lib/zfs-fd/${ZFS_FD_TIMESTAMP}"
-export ZFS_FD_LOG_FILE="/var/log/zfs-fd/${ZFS_FD_TIMESTAMP}.log"
-export ZFS_FD_DEPTH="3"  # Default depth
-
-# Create results and log directories
-sudo mkdir -p "$ZFS_FD_RESULTS_DIR" "/var/log/zfs-fd"
-sudo chown pball:pball "$ZFS_FD_RESULTS_DIR" "/var/log/zfs-fd"
-
-# Log function
-log() {
-    echo "$(date -Iseconds) [zfs-fd-snapshot] $1" | tee -a "$ZFS_FD_LOG_FILE"
-}
-
-log "Starting ZFS directory analysis setup"
-log "Source dataset: $SOURCE_DATASET"
-log "Clone destination: $CLONE_BASE"
-log "Snapshot tag: $ZFS_FD_SNAPTAG"
-
-# Get latest snapshot name and GUID before creating a new one
-ZFS_FD_PREVIOUS_SNAP_NAME=$(zfs list -t snapshot -o name -s creation "${SOURCE_DATASET}" | tail -n1)
-ZFS_FD_PREVIOUS_SNAP_GUID=$(zfs list -t snapshot -o guid -s creation "${SOURCE_DATASET}" | tail -n1)
-# Create recursive snapshot
-log "Creating recursive snapshot: $ZFS_FD_SOURCE_SNAP"
-echo "📸 Creating recursive snapshot..."
-if sudo zfs snapshot -r "$ZFS_FD_SOURCE_SNAP"; then
-    log "Snapshot created successfully: $ZFS_FD_SOURCE_SNAP"
-    echo "✅ Snapshot created: $ZFS_FD_SOURCE_SNAP"
-else
-    log "ERROR: Failed to create snapshot $ZFS_FD_SOURCE_SNAP"
-    echo "❌ Failed to create snapshot: $ZFS_FD_SOURCE_SNAP" >&2
+if [ -z "$SOURCE" ] || [ -z "$CLONE_BASE" ] || [ -z "$SNAPSHOT_TAG" ]; then
+    echo "Error: All arguments are required." >&2
     exit 1
 fi
 
-# Add hold for safety
-log "Adding hold to snapshot for safety"
-echo "🔒 Adding safety hold..."
-if sudo zfs hold -r du_analysis_hold "$ZFS_FD_SOURCE_SNAP"; then
-    log "Hold added successfully"
-    echo "✅ Safety hold applied"
-else
-    log "ERROR: Failed to add hold"
-    echo "❌ Failed to add safety hold" >&2
-    exit 1
-fi
+log() { echo "[$(date -Iseconds)] [zfs-fd-snapshot] $1" >&2; }
 
-# Create clone using zfsrclone
-log "Creating clone using zfsrclone..."
-echo "🔄 Creating clone..."
-if sudo "$SCRIPT_DIR/zfsrclone" --yes "$ZFS_FD_SOURCE_SNAP" "$CLONE_BASE"; then
-    log "Clone created successfully"
-    echo "✅ Clone created successfully"
-else
-    log "ERROR: Clone creation failed"
-    echo "❌ Clone creation failed" >&2
-    exit 1
-fi
+log "Creating recursive snapshot: $SOURCE@$SNAPSHOT_TAG"
+zfs snapshot -r "$SOURCE@$SNAPSHOT_TAG"
+log "Applying safety hold: du_analysis_hold"
+zfs hold du_analysis_hold "$SOURCE@$SNAPSHOT_TAG"
 
-# Save environment to file for other scripts
-cat > "$ZFS_FD_RESULTS_DIR/environment.sh" << EOE
-# ZFS-DU Environment Variables
-# Source this file to set up environment for other scripts
-export ZFS_FD_TIMESTAMP="$ZFS_FD_TIMESTAMP"
-export ZFS_FD_SNAPTAG="$ZFS_FD_SNAPTAG"
-export ZFS_FD_SOURCE_SNAP="$ZFS_FD_SOURCE_SNAP"
-export ZFS_FD_CLONE_BASE="$ZFS_FD_CLONE_BASE"
-export ZFS_FD_RESULTS_DIR="$ZFS_FD_RESULTS_DIR"
-export ZFS_FD_LOG_FILE="$ZFS_FD_LOG_FILE"
-export ZFS_FD_DEPTH="$ZFS_FD_DEPTH"
-EOE
+log "Cloning snapshot to $CLONE_BASE"
+"$SCRIPT_DIR/zfsrclone" --yes "$SOURCE@$SNAPSHOT_TAG" "$CLONE_BASE"
+log "✅ Snapshot and clone process complete."
 
-# Save metadata
-cat > "$ZFS_FD_RESULTS_DIR/metadata.json" << EOM
-{
-  "analysis": {
-    "timestamp": "$ZFS_FD_TIMESTAMP",
-    "snapshot_tag": "$ZFS_FD_SNAPTAG",
-    "default_depth": $ZFS_FD_DEPTH
-  },
-  "source": {
-    "dataset": "$SOURCE_DATASET",
-    "snapshot": "$ZFS_FD_SOURCE_SNAP",
-    "snapshot_created": true,
-    "hold_applied": true
-  },
-  "results": {
-    "directory": "$ZFS_FD_RESULTS_DIR",
-    "log_file": "$ZFS_FD_LOG_FILE"
-  },
-  "environment": {
-    "clone_base": "$ZFS_FD_CLONE_BASE",
-    "previous_snapshot_name": "$ZFS_FD_PREVIOUS_SNAP_NAME",
-    "previous_snapshot_guid": "$ZFS_FD_PREVIOUS_SNAP_GUID"
-  }
-}
-EOM
-
-log "Environment setup complete"
-log "Results directory: $ZFS_FD_RESULTS_DIR"
-log "Log file: $ZFS_FD_LOG_FILE"
-log "Next: Run 'zfs-fd-mount' to mount cloned datasets"
-
-echo ""
-echo "✅ Snapshot and clone setup complete!"
-echo "📸 Created snapshot: $ZFS_FD_SNAPTAG"
-echo "📁 Results directory: $ZFS_FD_RESULTS_DIR"
-echo "📄 Log file: $ZFS_FD_LOG_FILE"
-echo "📄 Source environment: source $ZFS_FD_RESULTS_DIR/environment.sh"
-echo "▶️  Next step: zfs-fd-mount"

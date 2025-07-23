@@ -1,168 +1,51 @@
 #!/bin/bash
-#
-# zfs-fd-cleanup - Robust cleanup of ZFS-FD resources
-# Version: 2.1 (2025-07-21)
-#
-# Author: PB and Gemini
-# License: (c) HRDAG, 2025, GPL-2 or newer
-#
-# This script robustly cleans up ZFS snapshots and holds created by zfs-fd.
-# It is designed to be safe, idempotent, and to learn from previous failures.
-
+# Standalone cleanup worker
 set -euo pipefail
 
-# --- Configuration ---
-# Hardcoded for safety. The only dataset that should ever be destroyed.
-SAFE_CLONE_BASE="deep_chll/tmp/zfs-fd-analysis"
-# The hold tag created by the zfs-fd project.
-HOLD_TAG="du_analysis_hold"
-# The unique identifier in snapshot names.
-SNAPSHOT_PATTERN="du-holder"
-
-# --- Argument Parsing ---
+CLONE_BASE=""
+SNAPSHOT_TAG=""
 SKIP_CONFIRMATION=false
-HOLDS_ONLY=false
 
-for arg in "$@"; do
-  case $arg in
-    --yes|-y) SKIP_CONFIRMATION=true; shift ;;
-    --holds-only) HOLDS_ONLY=true; shift ;;
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --clone-base) CLONE_BASE="$2"; shift; shift ;;
+    --snapshot-tag) SNAPSHOT_TAG="$2"; shift; shift ;;
+    --yes) SKIP_CONFIRMATION=true; shift ;;
+    *) echo "Usage: $0 --clone-base <path> [--snapshot-tag <tag>] [--yes]"; exit 1;;
   esac
 done
 
-# --- Core Functions ---
+if [ -z "$CLONE_BASE" ]; then echo "Error: --clone-base is required." >&2; exit 1; fi
 
-release_all_holds() {
-    echo
-    echo "🔓 CRITICAL: Releasing all '$HOLD_TAG' holds from snapshots containing '$SNAPSHOT_PATTERN'."
+log() { echo "[$(date -Iseconds)] [zfs-fd-cleanup] $1" >&2; }
 
-    local checked=0 released=0 failed=0
+# --- Clone Destruction ---
+if zfs list -H -o name "$CLONE_BASE" >/dev/null 2>&1; then
+    log "Destroying clone: $CLONE_BASE"
+    zfs destroy -rf "$CLONE_BASE"
+    log "✅ Clone destroyed."
+else
+    log "Clone $CLONE_BASE not found. Nothing to do."
+fi
 
-    # Using process substitution `< <(...)` to avoid subshell scope issues for variables.
-    while IFS= read -r snap; do
-        ((checked++))
-        if sudo zfs holds -H "$snap" 2>/dev/null | grep -q "$HOLD_TAG"; then
-            echo "🔒 Found hold on: $snap"
-            if sudo zfs release "$HOLD_TAG" "$snap"; then
-                echo "✅ Released hold on: $snap"
-                ((released++))
-            else
-                echo "❌ FAILED to release hold on: $snap" >&2
-                ((failed++))
-            fi
+# --- Snapshot/Hold Cleanup ---
+if [ -n "$SNAPSHOT_TAG" ]; then
+    # Surgical mode: only touch the specific tag
+    log "Releasing hold and destroying surgical snapshot: $SNAPSHOT_TAG"
+    zfs release du_analysis_hold "$SNAPSHOT_TAG" || log "(Hold already released)"
+    zfs destroy -r "$SNAPSHOT_TAG"
+    log "✅ Surgical cleanup complete."
+else
+    # Broad mode: find all snapshots with our hold tag and clean them up
+    log "Starting broad cleanup of all snapshots with tag 'du_analysis_hold'"
+    found=0
+    zfs list -t snapshot -H -o name | while IFS= read -r snap; do
+        if zfs holds -H "$snap" 2>/dev/null | grep -q "du_analysis_hold"; then
+            log "Found and cleaning stale snapshot: $snap"
+            zfs release du_analysis_hold "$snap"
+            zfs destroy -r "$snap"
+            found=$((found + 1))
         fi
-    done < <(sudo zfs list -t snapshot -H -o name 2>/dev/null | grep "$SNAPSHOT_PATTERN" || true)
-
-    echo
-    echo "📊 Hold Cleanup Summary:"
-    echo "   - Snapshots checked: $checked"
-    echo "   - Holds released: $released"
-    echo "   - Failed releases: $failed"
-
-    if [[ $failed -gt 0 ]]; then
-        echo "⚠️  WARNING: Failed to release $failed holds! Manual intervention is required."
-        return 1
-    fi
-    echo "✅ Hold cleanup step completed successfully."
-    return 0
-}
-
-destroy_clones() {
-    echo
-    echo "🗑️  Attempting to destroy cloned datasets under the safe base: '$SAFE_CLONE_BASE'"
-
-    if ! zfs list -H -o name "$SAFE_CLONE_BASE" >/dev/null 2>&1; then
-        echo "✅ No datasets found under '$SAFE_CLONE_BASE'. Nothing to do."
-        return 0
-    fi
-
-    echo "The following datasets will be recursively destroyed:"
-    zfs list -r -H -o name "$SAFE_CLONE_BASE" | sed 's/^/  - /'
-
-    if [[ "$SKIP_CONFIRMATION" == "false" ]]; then
-        echo
-        read -p "Proceed with destroying these datasets? [y/N] " -n 1 -r; echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "Cleanup cancelled by user."
-            return 1
-        fi
-    fi
-
-    if sudo zfs destroy -r "$SAFE_CLONE_BASE"; then
-        echo "✅ Successfully destroyed all datasets under '$SAFE_CLONE_BASE'."
-    else
-        echo "❌ Failed to destroy datasets under '$SAFE_CLONE_BASE'." >&2
-        return 1
-    fi
-}
-
-destroy_snapshots() {
-    echo
-    echo "🗑️  Attempting to destroy '$SNAPSHOT_PATTERN' snapshots."
-
-    local checked=0 destroyed=0 failed=0
-
-    # Using process substitution to avoid subshell scope issues for variables.
-    while IFS= read -r snap; do
-        ((checked++))
-        if sudo zfs destroy "$snap"; then
-            echo "✅ Destroyed: $snap"
-            ((destroyed++))
-        else
-            echo "❌ Failed to destroy: $snap" >&2
-            ((failed++))
-        fi
-    done < <(sudo zfs list -t snapshot -H -o name 2>/dev/null | grep "$SNAPSHOT_PATTERN" || true)
-
-    echo
-    echo "📊 Snapshot Destruction Summary:"
-    echo "   - Snapshots found to destroy: $checked"
-    echo "   - Successfully destroyed: $destroyed"
-    echo "   - Failed to destroy: $failed"
-
-    if [[ $failed -gt 0 ]]; then
-        echo "⚠️  WARNING: Failed to destroy $failed snapshots."
-        return 1
-    fi
-
-    if [[ $checked -eq 0 ]]; then
-        echo "✅ No '$SNAPSHOT_PATTERN' snapshots found to destroy."
-    fi
-
-    echo "✅ Snapshot destruction step completed."
-    return 0
-}
-
-
-# --- Main Execution Logic ---
-
-# Step 1: ALWAYS release holds.
-if ! release_all_holds; then
-    echo
-    echo "❌ CRITICAL: Failed to release all ZFS holds. Aborting." >&2
-    exit 1
+    done
+    log "✅ Broad cleanup complete. Found and destroyed $found stale snapshots."
 fi
-
-if [[ "$HOLDS_ONLY" == "true" ]]; then
-    echo
-    echo "✅ --holds-only mode specified. Exiting after hold release."
-    exit 0
-fi
-
-# Step 2: Destroy the cloned datasets.
-if ! destroy_clones; then
-    echo
-    echo "⚠️  Could not complete destruction of cloned datasets." >&2
-    exit 1
-fi
-
-# Step 3: Destroy the original snapshots.
-if ! destroy_snapshots; then
-    echo
-    echo "⚠️  Could not complete destruction of all snapshots." >&2
-    exit 1
-fi
-
-echo
-echo "✅ zfs-fd cleanup completed successfully."
-exit 0
