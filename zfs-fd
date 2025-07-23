@@ -69,7 +69,7 @@ run_complete_workflow() {
     source_fs=${source_fs:-$ZFS_FD_SOURCE}
 
     # --- Logging and Lock Setup ---
-    local results_dir="$ZFS_FD_BASE_DIR/$(date +%Y%m%d-%H%M%S)"
+    local results_dir="/$(date -Iseconds)"
     mkdir -p "$results_dir"
     local log_file="$results_dir/zfs-fd-run.log"
     exec > >(tee -a "$log_file") 2>&1
