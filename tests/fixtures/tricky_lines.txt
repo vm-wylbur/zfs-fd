@@ -1,0 +1,5 @@
+424 1743565511 /storage/tmp/zfs-fd-analysis/home/tarak/git/clean-mirror/metadata/Los Angeles County/Los Angeles Police Department/20241210_Scraped_LosAngelesPoliceDepartment/DR78-515986/7652748/DR78-515986 OIS February 28, 1978 Burts, Hicks, Miller, Moy - Shooting Review Board Report.pdf
+358 1743565465 /storage/tmp/zfs-fd-analysis/home/tarak/git/clean-mirror/metadata/Los Angeles County/Los Angeles Police Department/20241210_Scraped_LosAngelesPoliceDepartment/F006-19/27259012/F006-19 LERI February 26, 2019 Kenneth Sylvas - OIG Report.pdf
+379 1743565465 /storage/tmp/zfs-fd-analysis/home/tarak/git/clean-mirror/metadata/Los Angeles County/Los Angeles Police Department/20241210_Scraped_LosAngelesPoliceDepartment/F006-19/27259011/F006-19 LERI February 26, 2019 Kenneth Sylvas - Executive Summary
+.pdf
+373 1743565465 /storage/tmp/zfs-fd-analysis/home/tarak/git/clean-mirror/metadata/Los Angeles County/Los Angeles Police Department/20241210_Scraped_LosAngelesPoliceDepartment/F006-19/22766993/F006-19 LERI February 26, 2019 Kenneth Sylvas - Supplemental Report.pdf

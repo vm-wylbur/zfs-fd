@@ -108,7 +108,7 @@ echo "📋 Capturing file metadata..."
 # Use --no-ignore to include files normally ignored by .gitignore
 # Use --hidden to include hidden files (starting with .)
 # Run the capture command
-sudo fdfind --type f --no-ignore --hidden . "$MOUNT_BASE" --exec-batch stat --format='%s %n' > "$FILELIST_FILE"
+sudo fdfind --type f --no-ignore --hidden . "$MOUNT_BASE" --exec-batch stat --format='%s %.0Y %n' > "$FILELIST_FILE"
 
 # Get file count and log success
 FILE_COUNT=$(wc -l < "$FILELIST_FILE")
