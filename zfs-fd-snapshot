@@ -1,5 +1,5 @@
 #!/bin/bash
-# Standalone snapshot worker
+# Standalone snapshot worker. Accepts results-dir.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,30 +7,25 @@ CLONE_BASE=""
 SNAPSHOT_TAG=""
 SOURCE=""
 RUN_ID=""
+RESULTS_DIR=""
 
-# --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --clone-base)
-      CLONE_BASE="$2"; shift; shift ;;
-    --snapshot-tag)
-      SNAPSHOT_TAG="$2"; shift; shift ;;
-    --source)
-      SOURCE="$2"; shift; shift ;;
-    --run-id)
-      RUN_ID="$2"; shift; shift ;;
-    *)
-      echo "Usage: $0 --source <pool/fs> --clone-base <pool/fs> --snapshot-tag <tag> [--run-id <id>]" >&2
-      exit 1 ;;
+    --clone-base) CLONE_BASE="$2"; shift; shift ;;
+    --snapshot-tag) SNAPSHOT_TAG="$2"; shift; shift ;;
+    --source) SOURCE="$2"; shift; shift ;;
+    --run-id) RUN_ID="$2"; shift; shift ;;
+    --results-dir) RESULTS_DIR="$2"; shift; shift ;;
+    *) echo "Usage: $0 ... --results-dir <path>"; exit 1 ;;
   esac
 done
 
-if [ -z "$SOURCE" ] || [ -z "$CLONE_BASE" ] || [ -z "$SNAPSHOT_TAG" ]; then
-    echo "Error: All required arguments are not provided." >&2
-    exit 1
-fi
+if [ -z "$RESULTS_DIR" ]; then echo "Error: --results-dir is required." >&2; exit 1; fi
 
 log() { echo "[$(date -Iseconds)] [zfs-fd-snapshot] $1" >&2; }
+
+# Create the initial metadata file
+echo '{"analysis":{}}' > "$RESULTS_DIR/metadata.json"
 
 log "Creating recursive snapshot: $SOURCE@$SNAPSHOT_TAG"
 zfs snapshot -r "$SOURCE@$SNAPSHOT_TAG"
@@ -40,12 +35,11 @@ zfs hold du_analysis_hold "$SOURCE@$SNAPSHOT_TAG"
 log "Cloning snapshot to $CLONE_BASE"
 "$SCRIPT_DIR/zfsrclone" --yes "$SOURCE@$SNAPSHOT_TAG" "$CLONE_BASE"
 
-# The controller creates the results dir, we just need to know where it is
-results_dir=$(dirname "$(ls -t /var/lib/zfs-fd/*/environment.sh | head -n1)")
-if [ -d "$results_dir" ]; then
+if [ -n "$RUN_ID" ]; then
     log "Adding run-id to metadata."
-    jq --arg run_id "${RUN_ID:-}" '.analysis.run_id = $run_id' "$results_dir/metadata.json" > "$results_dir/metadata.json.tmp" && mv "$results_dir/metadata.json.tmp" "$results_dir/metadata.json"
+    jq --arg run_id "$RUN_ID" '.analysis.run_id = $run_id' "$RESULTS_DIR/metadata.json" > "$RESULTS_DIR/metadata.json.tmp" && mv "$RESULTS_DIR/metadata.json.tmp" "$RESULTS_DIR/metadata.json"
 fi
 
 log "✅ Snapshot and clone process complete."
 
+# DONE.

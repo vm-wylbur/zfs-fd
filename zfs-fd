@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Main controller. Final version with robust argument parsing.
+# Main controller. Final, correct version with explicit I/O.
 #
 set -euo pipefail
 
@@ -23,12 +23,24 @@ log() {
 # --- Help Function ---
 show_help() {
     cat << HELP
-ZFS File Distribution Analysis Tool
+zfs-fd: File Distribution Analysis Tool
 
-Usage: zfs-fd run [source_dataset] [--run-id <id>]
+Usage: zfs-fd run [source-fs] [--run-id <id>]
 
-Options:
-  --run-id <id>  Attach a specific ID to the analysis metadata.
+Commands:
+  run            Run a complete file distribution analysis
+  help           Show this help message
+
+Arguments:
+  source-fs      ZFS filesystem to analyze (default: deep_chll/backup)
+  --run-id <id>  Tag this analysis with an ID (optional)
+
+Example:
+  zfs-fd run deep_chll/backup --run-id backup-job-123
+
+Exit Codes:
+  0  Success
+  1  Error
 HELP
 }
 
@@ -37,7 +49,7 @@ cleanup_on_exit() {
     local exit_code=$?
     if [ -f "$LOCK_FILE" ] && [ "$(cat $LOCK_FILE 2>/dev/null)" == "$$" ]; then
         log "EXIT trap: Releasing lock file."
-        rm -f "$LOCK_FILE"
+        sudo rm -f "$LOCK_FILE"
     fi
     if [ -n "$tmp_dir" ] && [ -d "$tmp_dir" ]; then
         log "EXIT trap: Removing temporary directory: $tmp_dir"
@@ -52,37 +64,34 @@ cleanup_on_exit() {
 run_complete_workflow() {
     trap cleanup_on_exit EXIT HUP INT QUIT PIPE TERM
 
-    # --- Argument Parsing for the run command ---
+    # --- Argument Parsing ---
     local source_fs=""
     local run_id=""
-    
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --run-id)
-                if [ -n "$2" ]; then run_id="$2"; shift; shift; else log "Error: --run-id needs an argument"; exit 1; fi ;;
-            *)
-                if [ -z "$source_fs" ]; then source_fs="$1"; shift; else log "Error: Unknown argument $1"; exit 1; fi ;;
+            --run-id) if [ -n "$2" ]; then run_id="$2"; shift; shift; else log "Error: --run-id needs an argument"; exit 1; fi ;;
+            *) if [ -z "$source_fs" ]; then source_fs="$1"; shift; else log "Error: Unknown argument $1"; exit 1; fi ;;
         esac
     done
-
-    # Use default source if not provided
     source_fs=${source_fs:-$ZFS_FD_SOURCE}
 
     # --- Logging and Lock Setup ---
-    local results_dir="/$(date -Iseconds)"
-    mkdir -p "$results_dir"
+    local results_dir="$ZFS_FD_BASE_DIR/$(date -Iseconds)"
+    sudo mkdir -p "$results_dir"
     local log_file="$results_dir/zfs-fd-run.log"
     exec > >(tee -a "$log_file") 2>&1
 
-    log "🚀 Starting complete ZFS-FD workflow. Results will be in: $results_dir"
+    log "🚀 Starting workflow. Results dir: $results_dir"
     if [[ $EUID -ne 0 ]]; then log "❌ Error: Must be run with sudo"; exit 1; fi
-    log "Attempting to acquire lock: $LOCK_FILE"
+    log "Acquiring lock: $LOCK_FILE"
     if [ -f "$LOCK_FILE" ]; then log "❌ Error: Lock file found."; exit 1; fi
     echo $$ > "$LOCK_FILE"
     log "✅ Lock acquired."
+
     tmp_dir=$(mktemp -d)
-    log "Working in temporary directory: $tmp_dir"
-    log "Running pre-flight cleanup..."
+    log "Working in temp dir: $tmp_dir"
+
+    log "Pre-flight cleanup..."
     "$SCRIPT_DIR/zfs-fd-cleanup" --clone-base "$ZFS_FD_CLONE_BASE" --yes
     log "✅ System state is clean."
 
@@ -91,15 +100,21 @@ run_complete_workflow() {
     local full_snapshot_name="$source_fs@$snapshot_tag"
 
     log "📸 Step 1/5: Creating snapshot..."
-    "$SCRIPT_DIR/zfs-fd-snapshot" --source "$source_fs" --clone-base "$ZFS_FD_CLONE_BASE" --snapshot-tag "$snapshot_tag" --run-id "$run_id"
+    "$SCRIPT_DIR/zfs-fd-snapshot" --source "$source_fs" --clone-base "$ZFS_FD_CLONE_BASE" --snapshot-tag "$snapshot_tag" --run-id "$run_id" --results-dir "$results_dir"
     
     log "🔌 Step 2/5: Mounting clones..."
     local mount_base=$("$SCRIPT_DIR/zfs-fd-mount" --clone-base "$ZFS_FD_CLONE_BASE")
+    if [ -z "$mount_base" ]; then
+        log "❌ Error: Mount failed. Proceeding to cleanup."
+        "$SCRIPT_DIR/zfs-fd-cleanup" --clone-base "$ZFS_FD_CLONE_BASE" --snapshot-tag "$full_snapshot_name" --yes
+        exit 1
+    fi
     log "✅ Mount point: $mount_base"
 
     log "📊 Step 3/5: Capturing file metadata..."
     local filelist_path="$tmp_dir/filelist.txt"
     "$SCRIPT_DIR/zfs-fd-capture" --mount-base "$mount_base" --output "$filelist_path"
+    sudo mv "$filelist_path" "$results_dir/filelist.txt"
     log "✅ Capture complete."
 
     log "🧹 Step 4/5: Cleaning up ZFS resources..."
@@ -112,7 +127,7 @@ run_complete_workflow() {
     # --- Offline Processing ---
     log "🔍 Step 5/5: Processing captured data..."
     local awk_output_path="$tmp_dir/awk_output.txt"
-    "$SCRIPT_DIR/zfs-fd-process" --input "$filelist_path" --base-path "$mount_base" > "$awk_output_path"
+    "$SCRIPT_DIR/zfs-fd-process" --input "$results_dir/filelist.txt" --base-path "$mount_base" > "$awk_output_path"
 
     local final_json_path="$results_dir/analysis.json"
     "$SCRIPT_DIR/zfs-fd-postprocess" --input "$awk_output_path" --output "$final_json_path"
@@ -122,7 +137,6 @@ run_complete_workflow() {
     tmp_dir=""
     
     log "🎉 Workflow finished successfully!"
-
     trap - EXIT
 }
 
@@ -141,3 +155,5 @@ case "$COMMAND" in
         exit 1
     fi ;;
 esac
+
+# DONE.

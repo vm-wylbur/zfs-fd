@@ -1,5 +1,5 @@
 #!/bin/bash
-# Standalone cleanup worker
+# Standalone cleanup worker. Final, correct version.
 set -euo pipefail
 
 CLONE_BASE=""
@@ -32,11 +32,12 @@ fi
 if [ -n "$SNAPSHOT_TAG" ]; then
     # Surgical mode: only touch the specific tag
     log "Releasing hold and destroying surgical snapshot: $SNAPSHOT_TAG"
-    zfs release du_analysis_hold "$SNAPSHOT_TAG" || log "(Hold already released)"
+    # Use || true to prevent script exit if hold is already gone
+    zfs release du_analysis_hold "$SNAPSHOT_TAG" 2>/dev/null || true
     zfs destroy -r "$SNAPSHOT_TAG"
     log "✅ Surgical cleanup complete."
 else
-    # Broad mode: find all snapshots with our hold tag and clean them up
+    # Broad mode
     log "Starting broad cleanup of all snapshots with tag 'du_analysis_hold'"
     found=0
     zfs list -t snapshot -H -o name | while IFS= read -r snap; do
@@ -49,3 +50,5 @@ else
     done
     log "✅ Broad cleanup complete. Found and destroyed $found stale snapshots."
 fi
+
+# DONE.
