@@ -148,8 +148,19 @@ run_complete_workflow() {
     local awk_output_path="$tmp_dir/awk_output.txt"
     "$SCRIPT_DIR/zfs-fd-process" --input "$results_dir/filelist.txt" --base-path "$mount_base" > "$awk_output_path"
 
+    # Start compression in background immediately after processing
+    xz -3 "$results_dir/filelist.txt" &
+    COMPRESS_PID=$!
+
     local final_json_path="$results_dir/analysis.json"
     "$SCRIPT_DIR/zfs-fd-postprocess" --input "$awk_output_path" --output "$final_json_path"
+
+    # Wait for compression and verify success
+    if wait $COMPRESS_PID && [[ -f "$results_dir/filelist.txt.xz" ]]; then
+        log "✅ Filelist compression complete: filelist.txt.xz"
+    else
+        log "⚠️  Filelist compression failed or incomplete"
+    fi
     sudo jq --arg val "$(date -Iseconds)" '.timing.process_end = $val' "$metadata_file" | sudo tee "$metadata_file.tmp" >/dev/null && sudo mv "$metadata_file.tmp" "$metadata_file"
     log "✅ Processing complete."
     
