@@ -1,34 +1,231 @@
 #!/bin/bash
-# Standalone capture worker
-set -euo pipefail
 
-MOUNT_BASE=""
+# ZFS Filesystem Discovery Tool
+# Generates a filesystem manifest from ZFS snapshots using fast, parallel scanning.
+
+# Default configuration
 OUTPUT_FILE=""
+TEMP_DIR=""
+ZPOOL_ROOT=""
+RUN_ID=""
+JOBS=4
 
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --mount-base)
-      MOUNT_BASE="$2"; shift; shift ;;
-    --output)
-      OUTPUT_FILE="$2"; shift; shift ;;
-    *)
-      echo "Usage: $0 --mount-base <path> --output <file>" >&2
-      exit 1;;
-  esac
-done
+# Snapshot selection (per dataset)
+SNAPSHOT_MODE="latest"      # latest | pattern
+SNAPSHOT_PATTERN=""
 
-if [ -z "$MOUNT_BASE" ] || [ -z "$OUTPUT_FILE" ]; then
-    echo "Error: All arguments are required." >&2
+usage() {
+  cat <<EOF
+Usage: $0 [OPTIONS]
+
+Generate a filesystem manifest from a ZFS snapshot using fast, parallel scanning.
+
+Required:
+  -p, --zpool-root PATH       ZFS pool root path (e.g., /storage or /deep_chll)
+  -o, --output FILE           Output TSV-like file (FS=ASCII 0x1C)
+  -r, --run-id ID             Run identifier; written as '# RUN_ID: ...' at top
+
+Snapshot selection (per dataset):
+  -S, --snapshot-latest       Use latest snapshot per dataset (default)
+  -P, --snapshot-pattern REGEX
+                              Use latest snapshot per dataset whose name matches REGEX;
+                              if no match on a dataset, WARN and fall back to latest.
+
+Optional:
+  -j, --jobs N                Parallel jobs (default: 4)
+  -h, --help                  Show this help
+
+Output header (commented):
+  # RUN_ID: <id>
+  # TIMESTAMP: <iso8601>
+  # ZPOOL_ROOT: <path>
+  # SNAPSHOT_SELECTOR: latest | pattern(<regex>)
+  # JOBS: <n>
+  # FORMAT: dataset<FS>size<FS>mtime<FS>fullpath (FS=ASCII 0x1C)
+  dataset^size^mtime^fullpath (columns are informational; actual delimiter is FS)
+EOF
+}
+
+check_root() {
+  if [[ $EUID -ne 0 ]]; then
+    echo "Error: This script must be run as root (ZFS commands require root privileges)" >&2
+    echo "Please run with: sudo $0 [options]" >&2
     exit 1
-fi
+  fi
+}
 
-log() { echo "[$(date -Iseconds)] [zfs-fd-capture] $1" >&2; }
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -p|--zpool-root) ZPOOL_ROOT="$2"; shift 2 ;;
+      -o|--output) OUTPUT_FILE="$2"; shift 2 ;;
+      -r|--run-id) RUN_ID="$2"; shift 2 ;;
+      -j|--jobs) JOBS="$2"; shift 2 ;;
+      -S|--snapshot-latest) SNAPSHOT_MODE="latest"; shift ;;
+      -P|--snapshot-pattern) SNAPSHOT_MODE="pattern"; SNAPSHOT_PATTERN="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    esac
+  done
+}
 
-log "Starting capture from $MOUNT_BASE"
-# We need fdfind, which might not be in the root PATH
-FD_CMD=fdfind
-if ! command -v $FD_CMD &> /dev/null; then FD_CMD=fd; fi
+validate_params() {
+  local errors=0
 
-$FD_CMD --type f --no-ignore --hidden . "$MOUNT_BASE" --exec-batch stat --format='%s %.0Y %n' > "$OUTPUT_FILE"
-log "✅ Capture complete. Output at $OUTPUT_FILE"
+  if [[ -z "$ZPOOL_ROOT" ]]; then
+    echo "Error: --zpool-root is required" >&2
+    errors=$((errors+1))
+  else
+    # Ensure ZPOOL_ROOT ends with "backup" (with or without trailing slash)
+    if [[ ! "$ZPOOL_ROOT" =~ backup/?$ ]]; then
+      echo "Error: --zpool-root must end with 'backup' (e.g., 'deep_chll/backup')" >&2
+      errors=$((errors+1))
+    fi
+  fi
 
+  if [[ -z "$OUTPUT_FILE" ]]; then
+    echo "Error: --output is required" >&2
+    errors=$((errors+1))
+  fi
+
+  if [[ -z "$RUN_ID" ]]; then
+    echo "Error: --run-id is required" >&2
+    errors=$((errors+1))
+  fi
+
+  if [[ "$SNAPSHOT_MODE" == "pattern" && -z "$SNAPSHOT_PATTERN" ]]; then
+    echo "Error: --snapshot-pattern requires a regex" >&2
+    errors=$((errors+1))
+  fi
+
+  if [[ $errors -gt 0 ]]; then echo; usage >&2; exit 1; fi
+}
+
+write_header() {
+  echo "# RUN_ID: $RUN_ID"
+  echo "# START_TIME: $(date -Iseconds)"
+  echo "# ZPOOL_ROOT: $ZPOOL_ROOT"
+  if [[ "$SNAPSHOT_MODE" == "pattern" ]]; then
+    echo "# SNAPSHOT_SELECTOR: pattern($SNAPSHOT_PATTERN)"
+  else
+    echo "# SNAPSHOT_SELECTOR: latest"
+  fi
+  echo "# JOBS: $JOBS"
+  echo "# FORMAT: dataset<FS>size<FS>mtime<FS>fullpath (FS=ASCII 0x1C)"
+  printf "dataset\034size\034mtime\034fullpath\n"
+}
+
+# Function to process a single dataset or path
+process_path() {
+    local dataset="$1"
+    local custom_path="$2"
+    local temp_dir="$3"
+
+    if [[ -z "$custom_path" ]]; then
+        # Processing full dataset
+        # List snapshots for this dataset (newest last)
+        local snaps chosen
+        snaps="$(zfs list -t snapshot -H -o name -s creation "$dataset" 2>/dev/null || true)"
+        chosen=""
+        if [[ -n "$snaps" ]]; then
+          case "$SNAPSHOT_MODE" in
+            pattern)
+              chosen="$(printf '%s\n' "$snaps" | awk -F'@' -v pat="$SNAPSHOT_PATTERN" '$2 ~ pat {print}' | tail -1)"
+              if [[ -z "$chosen" ]]; then
+                echo "Warning: no match for pattern on $dataset; using latest" >&2
+                chosen="$(printf '%s\n' "$snaps" | tail -1)"
+              fi
+              ;;
+            latest|*)
+              chosen="$(printf '%s\n' "$snaps" | tail -1)"
+              ;;
+          esac
+        fi
+        if [[ -n "$chosen" ]]; then
+            snapshot_name="${chosen#*@}"
+            mountpoint=$(zfs get -H -o value mountpoint "$dataset")
+
+            if [[ "$mountpoint" != "none" ]] && [[ "$mountpoint" != "-" ]]; then
+                snap_path="$mountpoint/.zfs/snapshot/$snapshot_name"
+                temp_file="$temp_dir/$(echo "$dataset" | tr '/' '_').tsv"
+
+                echo "Processing $dataset..." >&2
+
+                fdfind --type f --no-ignore --hidden . "$snap_path" \
+                       --exec-batch stat --printf "${dataset}\034%s\034%.0Y\034%n\n" > "$temp_file"
+            fi
+        fi
+    else
+        # Processing custom path (subdirectory)
+        subdir_name=$(basename "$custom_path")
+        temp_file="$temp_dir/$(echo "$dataset" | tr '/' '_')_${subdir_name}.tsv"
+
+        echo "Processing $dataset/$subdir_name..." >&2
+
+        fdfind --type f --no-ignore --hidden . "$custom_path" \
+               --exec-batch stat --printf "${dataset}\034%s\034%.0Y\034%n\n" > "$temp_file"
+    fi
+}
+
+main() {
+    check_root
+    parse_args "$@"
+    validate_params
+
+    TEMP_DIR=$(mktemp -d)
+    trap "rm -rf '$TEMP_DIR'" EXIT
+
+    # Write header to output file
+    write_header > "$OUTPUT_FILE"
+
+    export -f process_path
+    export SNAPSHOT_MODE SNAPSHOT_PATTERN
+
+    # Generate work units for specific backup structure
+    {
+        # Small datasets - process as single units
+        echo "$ZPOOL_ROOT"
+        zfs list -r -H -o name "$ZPOOL_ROOT/zsd" 2>/dev/null || true
+
+        # Large home dataset - split by subdirectory
+        local home_snaps home_chosen
+        home_snaps="$(zfs list -t snapshot -H -o name -s creation "$ZPOOL_ROOT/home" 2>/dev/null || true)"
+        home_chosen=""
+        if [[ -n "$home_snaps" ]]; then
+          case "$SNAPSHOT_MODE" in
+            pattern)
+              home_chosen="$(printf '%s\n' "$home_snaps" | awk -F'@' -v pat="$SNAPSHOT_PATTERN" '$2 ~ pat {print}' | tail -1)"
+              if [[ -z "$home_chosen" ]]; then
+                echo "Warning: no match for pattern on $ZPOOL_ROOT/home; using latest" >&2
+                home_chosen="$(printf '%s\n' "$home_snaps" | tail -1)"
+              fi
+              ;;
+            latest|*)
+              home_chosen="$(printf '%s\n' "$home_snaps" | tail -1)"
+              ;;
+          esac
+        fi
+
+        if [[ -n "$home_chosen" ]]; then
+            snapshot_name="${home_chosen#*@}"
+            mountpoint=$(zfs get -H -o value mountpoint "$ZPOOL_ROOT/home")
+
+            if [[ "$mountpoint" != "none" ]] && [[ "$mountpoint" != "-" ]]; then
+                snap_path="$mountpoint/.zfs/snapshot/$snapshot_name"
+                # Process each home subdirectory separately
+                find "$snap_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r subdir; do
+                    echo "$ZPOOL_ROOT/home $subdir"
+                done
+            fi
+        fi
+    } | xargs -P "$JOBS" -I {} bash -c 'read -r dataset custom_path <<< "{}"; process_path "$dataset" "$custom_path" "'$TEMP_DIR'"'
+
+    # Combine all results
+    cat "$TEMP_DIR"/*.tsv >> "$OUTPUT_FILE" 2>/dev/null
+    echo "# FINISH_TIME: $(date -Iseconds)" >> "$OUTPUT_FILE"
+
+    echo "Done. Output written to $OUTPUT_FILE" >&2
+}
+
+# Run main function with all arguments
+main "$@"
