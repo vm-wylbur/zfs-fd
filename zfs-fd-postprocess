@@ -15,10 +15,9 @@ def main():
     parser.add_argument("--output", required=True, help="Path for the final JSON output.")
     args = parser.parse_args()
 
-    directories = {}
-    total_files = 0
-    total_bytes = 0
-
+    all_directories = {}
+    
+    # First pass: collect all directories
     with open(args.input, 'r') as f:
         for line in f:
             if not line.strip():
@@ -27,19 +26,36 @@ def main():
                 size_str, count_str, path = line.strip().split('\t', 2)
                 size = int(size_str)
                 count = int(count_str)
-
-                directories[path] = {
+                
+                all_directories[path] = {
                     "total_size": size,
-                    "file_count": count,
-                    "files": [],
-                    "subdirs": {}
+                    "file_count": count
                 }
-                total_files += count
-                total_bytes += size
             except ValueError as e:
                 print(f"Skipping malformed line: {line.strip()}", file=sys.stderr)
                 continue
-
+    
+    # Filter to only keep level 4 directories (paths with exactly 3 slashes)
+    # Also keep shorter paths if they don't have deeper children
+    directories = {}
+    for path, data in all_directories.items():
+        depth = path.count('/')
+        
+        # Check if this path has any deeper children
+        has_deeper_children = any(
+            other.startswith(path + '/') 
+            for other in all_directories.keys() 
+            if other != path
+        )
+        
+        # Keep if: exactly depth 3 (4 levels), OR no deeper children exist
+        if depth == 3 or not has_deeper_children:
+            directories[path] = data
+    
+    # Calculate totals only from filtered directories
+    total_files = sum(d["file_count"] for d in directories.values())
+    total_bytes = sum(d["total_size"] for d in directories.values())
+    
     result = {
         "directories": directories,
         "summary": {
