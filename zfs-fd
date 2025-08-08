@@ -1,0 +1,144 @@
+#!/bin/bash
+# Author: PB and Claude
+# Date: 2025-08-08
+# License: (c) HRDAG, 2025, GPL-2 or newer
+#
+# ------
+# zfs-fd/zfs-fd
+#
+# Main controller for ZFS filesystem discovery workflow
+# Takes a single RUN_ID argument and orchestrates the full pipeline
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Configuration
+ZFS_FD_BASE_DIR="/var/lib/zfs-fd"
+ZPOOL_ROOT="deep_chll/backup"  # Default, could be made configurable
+JOBS=4                          # Parallel jobs for capture
+
+# Parse arguments
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 RUN_ID" >&2
+    echo "  RUN_ID: Unique identifier for this analysis run" >&2
+    exit 1
+fi
+
+RUN_ID="$1"
+
+# Setup paths
+OUTPUT_TSV="${ZFS_FD_BASE_DIR}/filelist-${RUN_ID}.tsv"
+OUTPUT_TSV_XZ="${OUTPUT_TSV}.xz"
+INTERMEDIATE_AWK="${ZFS_FD_BASE_DIR}/intermediate-${RUN_ID}.txt"
+OUTPUT_JSON="${ZFS_FD_BASE_DIR}/topdirs-${RUN_ID}.json"
+
+# Ensure output directory exists
+if [[ ! -d "$ZFS_FD_BASE_DIR" ]]; then
+    echo "Creating output directory: $ZFS_FD_BASE_DIR" >&2
+    sudo mkdir -p "$ZFS_FD_BASE_DIR"
+fi
+
+# Check for required tools
+for tool in zfs fdfind stat xz; do
+    if ! command -v "$tool" &> /dev/null; then
+        echo "Error: Required tool '$tool' not found in PATH" >&2
+        exit 1
+    fi
+done
+
+# Check root privileges (required for ZFS commands)
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: This script must be run as root (ZFS commands require root privileges)" >&2
+    echo "Please run with: sudo $0 '$RUN_ID'" >&2
+    exit 1
+fi
+
+# Log function
+log() {
+    echo "[$(date -Iseconds)] [zfs-fd] $1" >&2
+}
+
+# Cleanup function
+cleanup() {
+    local exit_code=$?
+    if [[ -f "$INTERMEDIATE_AWK" ]]; then
+        log "Cleaning up intermediate file"
+        rm -f "$INTERMEDIATE_AWK"
+    fi
+    if [[ $exit_code -ne 0 ]]; then
+        log "Workflow failed with exit code $exit_code"
+        # Clean up partial outputs on failure
+        rm -f "$OUTPUT_TSV" "$OUTPUT_JSON"
+    fi
+}
+trap cleanup EXIT
+
+# Main workflow
+log "Starting ZFS filesystem discovery for RUN_ID: $RUN_ID"
+
+# Step 1: Capture filesystem data
+log "Step 1/4: Capturing filesystem data from ZFS snapshots..."
+if ! "$SCRIPT_DIR/zfs-fd-capture" \
+    --zpool-root "$ZPOOL_ROOT" \
+    --output "$OUTPUT_TSV" \
+    --run-id "$RUN_ID" \
+    --jobs "$JOBS" \
+    --snapshot-latest; then
+    log "Error: Failed to capture filesystem data"
+    exit 1
+fi
+
+# Verify TSV was created and has content
+if [[ ! -s "$OUTPUT_TSV" ]]; then
+    log "Error: Output TSV file is empty or missing"
+    exit 1
+fi
+
+# Get line count for logging (excluding comments)
+LINE_COUNT=$(grep -v '^#' "$OUTPUT_TSV" | wc -l)
+log "Captured $LINE_COUNT file entries"
+
+# Step 2: Process with awk for aggregation
+log "Step 2/4: Processing data for directory aggregation..."
+if ! "$SCRIPT_DIR/zfs-fd-process" \
+    --input "$OUTPUT_TSV" \
+    --base-path "/${ZPOOL_ROOT}" > "$INTERMEDIATE_AWK"; then
+    log "Error: Failed to process data with awk"
+    exit 1
+fi
+
+# Step 3: Generate JSON output
+log "Step 3/4: Generating JSON summary..."
+if ! "$SCRIPT_DIR/zfs-fd-postprocess" \
+    --input "$INTERMEDIATE_AWK" \
+    --output "$OUTPUT_JSON"; then
+    log "Error: Failed to generate JSON output"
+    exit 1
+fi
+
+# Step 4: Compress TSV file
+log "Step 4/4: Compressing TSV file..."
+if ! xz -3 -f "$OUTPUT_TSV"; then
+    log "Error: Failed to compress TSV file"
+    exit 1
+fi
+
+# Final verification
+if [[ ! -f "$OUTPUT_TSV_XZ" ]] || [[ ! -f "$OUTPUT_JSON" ]]; then
+    log "Error: Expected output files not found"
+    exit 1
+fi
+
+# Report results
+TSV_SIZE=$(stat -c%s "$OUTPUT_TSV_XZ" 2>/dev/null || echo "0")
+JSON_SIZE=$(stat -c%s "$OUTPUT_JSON" 2>/dev/null || echo "0")
+
+log "SUCCESS: ZFS filesystem discovery completed"
+log "  Run ID: $RUN_ID"
+log "  Compressed TSV: $OUTPUT_TSV_XZ ($(numfmt --to=iec-i --suffix=B $TSV_SIZE))"
+log "  JSON summary: $OUTPUT_JSON ($(numfmt --to=iec-i --suffix=B $JSON_SIZE))"
+log "  Files processed: $LINE_COUNT"
+
+# Output paths for scripting
+echo "$OUTPUT_JSON"
