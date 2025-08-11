@@ -2,7 +2,7 @@
 
 Fast filesystem discovery for ZFS snapshots. Enumerate millions of files in minutes, not hours.
 
-## TL;DR
+## tl;dr 
 
 **Problem**: Need to know what files exist in your ZFS backups without mounting snapshots or waiting forever.
 
@@ -185,14 +185,12 @@ When comparing snapshots to live filesystems, expect these patterns:
 
 2. **Find your actual limits**: Don't assume you're I/O bound - test it! We assumed parallel processing wouldn't help, but it turns out 4-8 workers made a huge difference. Your bottleneck might not be where you think.
 
-3. **Modern tools matter**: Traditional `find` is painfully slow. `fdfind` is literally 10-100x faster for this workload. The unix philosophy holds (small tools, composed well) but that doesn't mean we're stuck with 1970s implementations. Also: awk, xargs, and stat are workhorses that handle millions of records without breaking a sweat.
+3. **Modern tools matter**: Traditional `find` is painfully slow. `fdfind` is literally 10-100x faster for this workload. The unix philosophy holds (small tools, composed well) but that doesn't mean we're stuck with 1970s implementations. Also: `awk`, `xargs`, and `stat` are workhorses that handle millions of records without burping.
 
 4. **Compression is magic but costs time**: Yes, 10:1 compression is amazing for storage and transfer. But xz compression takes real wall-clock time - factor that into your pipeline. Sometimes you want the data now, not compressed later.
 
 ## License
-
 (c) HRDAG, 2025, GPL-2 or newer
-
 Because good tools should be free, and filesystem enumeration shouldn't be rocket science.
 
 ## Authors
